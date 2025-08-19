@@ -1,98 +1,32 @@
-# =================================================================
-#
-# Authors: Jorge Samuel Mendes de Jesus <jorge.dejesus@protonmail.com>
-#          Tom Kralidis <tomkralidis@gmail.com>
-#          Mary Bucknell <mbucknell@usgs.gov>
-#          John A Stevenson <jostev@bgs.ac.uk>
-#          Colin Blackburn <colb@bgs.ac.uk>
-#          Francesco Bartoli <xbartolone@gmail.com>
-#          Bernhard Mallinger <bernhard.mallinger@eox.at>
-#
-# Copyright (c) 2018 Jorge Samuel Mendes de Jesus
-# Copyright (c) 2025 Tom Kralidis
-# Copyright (c) 2022 John A Stevenson and Colin Blackburn
-# Copyright (c) 2025 Francesco Bartoli
-# Copyright (c) 2024 Bernhard Mallinger
-#
-# Permission is hereby granted, free of charge, to any person
-# obtaining a copy of this software and associated documentation
-# files (the "Software"), to deal in the Software without
-# restriction, including without limitation the rights to use,
-# copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the
-# Software is furnished to do so, subject to the following
-# conditions:
-#
-# The above copyright notice and this permission notice shall be
-# included in all copies or substantial portions of the Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
-# OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
-# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
-# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
-# OTHER DEALINGS IN THE SOFTWARE.
-#
-# =================================================================
-
-# Testing local docker:
-# docker run --name "postgis" \
-# -v postgres_data:/var/lib/postgresql -p 5432:5432 \
-# -e ALLOW_IP_RANGE=0.0.0.0/0 \
-# -e POSTGRES_USER=postgres \
-# -e POSTGRES_PASS=postgres \
-# -e POSTGRES_DBNAME=test \
-# -d -t kartoza/postgis
-
-# Import dump:
-# gunzip < tests/data/hotosm_bdi_waterways.sql.gz |
-#  psql -U postgres -h 127.0.0.1 -p 5432 test
-
+import os
+import json
 from copy import deepcopy
 from datetime import datetime
 from decimal import Decimal
 import functools
 import logging
-
+from typing import Dict, Any
 from geoalchemy2 import Geometry, WKBElement  # noqa - this isn't used explicitly but is needed to process Geometry columns
 from geoalchemy2.functions import ST_MakeEnvelope
-from geoalchemy2.shape import to_shape, from_shape
+from geoalchemy2.shape import from_shape
 from pygeofilter.backends.sqlalchemy.evaluate import to_filter
 import pyproj
 import shapely
-from sqlalchemy import create_engine, MetaData, PrimaryKeyConstraint, asc, \
-    desc, delete
+from osgeo import ogr, osr
+from sqlalchemy import create_engine, MetaData, PrimaryKeyConstraint, asc, desc, delete, text, select
 from sqlalchemy.engine import URL
-from sqlalchemy.exc import ConstraintColumnNotFoundError, \
-    InvalidRequestError, OperationalError
+from sqlalchemy.exc import ConstraintColumnNotFoundError, InvalidRequestError, OperationalError
 from sqlalchemy.ext.automap import automap_base
 from sqlalchemy.orm import Session, load_only
 from sqlalchemy.sql.expression import and_
-
-from pygeoapi.provider.base import BaseProvider, \
-    ProviderConnectionError, ProviderInvalidDataError, ProviderQueryError, \
-    ProviderItemNotFoundError
-
+from pygeoapi.provider.base import BaseProvider, ProviderConnectionError, ProviderInvalidDataError, ProviderQueryError, ProviderItemNotFoundError
 from pygeoapi.util import get_transform_from_crs, CrsTransformSpec
-
-from osgeo import ogr, osr
-import json
-from typing import Dict, List, Any
-
-from .helpers import get_coordinate_transformation, get_target_epsg, add_geojson_crs, get_table_ids, clear_cache
-
+from .helpers import get_coordinate_transformation, get_target_epsg, add_geojson_crs, get_table_ids
 
 LOGGER = logging.getLogger(__name__)
 
 
 class PostgreSQLExtendedProvider(BaseProvider):
-    """Generic provider for Postgresql based on psycopg2
-    using sync approach and server side
-    cursor (using support class DatabaseCursor)
-    """
-
     def __init__(self, provider_def):
         """
         PostgreSQLProvider Class constructor
@@ -111,24 +45,18 @@ class PostgreSQLExtendedProvider(BaseProvider):
         self.id_field = provider_def['id_field']
         self.geom = provider_def.get('geom_field', 'geom')
 
-        LOGGER.debug(f'Name: {self.name}')
-        LOGGER.debug(f'Table: {self.table}')
-        LOGGER.debug(f'ID field: {self.id_field}')
-        LOGGER.debug(f'Geometry field: {self.geom}')
-
-        # conforming to the docs:
-        # https://docs.pygeoapi.io/en/latest/data-publishing/ogcapi-features.html#connection-examples # noqa
         self.storage_crs = provider_def.get(
             'storage_crs',
             'https://www.opengis.net/def/crs/OGC/0/CRS84'
         )
-        LOGGER.debug(f'Configured Storage CRS: {self.storage_crs}')
 
-        # Read table information from database
         options = None
+
         if provider_def.get('options'):
             options = provider_def['options']
+
         self._store_db_parameters(provider_def['data'], options)
+
         self._engine = get_engine(
             self.db_host,
             self.db_port,
@@ -137,6 +65,7 @@ class PostgreSQLExtendedProvider(BaseProvider):
             self._db_password,
             **(self.db_options or {})
         )
+
         self.table_model = get_table_model(
             self.table,
             self.id_field,
@@ -172,8 +101,6 @@ class PostgreSQLExtendedProvider(BaseProvider):
         :returns: GeoJSON FeatureCollection
         """
 
-        LOGGER.debug('Preparing filters')
-
         property_filters: Any = self._get_property_filters(properties)
         cql_filters: Any = self._get_cql_filters(filterq)
         bbox_filter: Any = self._get_bbox_filter(bbox)
@@ -182,8 +109,6 @@ class PostgreSQLExtendedProvider(BaseProvider):
         selected_properties = self._select_properties_clause(select_properties,
                                                              skip_geometry)
 
-        LOGGER.debug('Querying PostGIS')
-        # Execute query within self-closing database Session context
         with Session(self._engine) as session:
             results = (session.query(self.table_model)
                        .filter(property_filters)
@@ -192,12 +117,7 @@ class PostgreSQLExtendedProvider(BaseProvider):
                        .filter(time_filter)
                        .options(selected_properties))
 
-            # matched = results.count()
-            matched = 10
-
-            LOGGER.debug(f'Found {matched} result(s)')
-
-            LOGGER.debug('Preparing response')
+            matched = results.count()
 
             response: Dict = {
                 'type': 'FeatureCollection',
@@ -216,7 +136,10 @@ class PostgreSQLExtendedProvider(BaseProvider):
             coord_trans = get_coordinate_transformation(
                 crs_transform_spec)
 
-            for item in results.order_by(*order_by_clauses).offset(offset).limit(limit):  # noqa
+            items = results.order_by(
+                *order_by_clauses).offset(offset).limit(limit)
+
+            for item in items:
                 response['numberReturned'] += 1
                 response['features'].append(
                     self._sqlalchemy_to_feature(item, target_epsg, coord_trans)
@@ -389,15 +312,27 @@ class PostgreSQLExtendedProvider(BaseProvider):
 
         return result.rowcount > 0
 
-    def _store_db_parameters(self, parameters, options):
+    def _store_db_parameters(self, parameters: Dict, options):
         self.db_user = parameters.get('user')
         self.db_host = parameters.get('host')
         self.db_port = parameters.get('port', 5432)
         self.db_name = parameters.get('dbname')
+
         # db_search_path gets converted to a tuple here in order to ensure it
         # is hashable - which allows us to use functools.cache() when
         # reflecting the table definition from the DB
-        self.db_search_path = tuple(parameters.get('search_path', ['public']))
+
+        search_path = parameters.get('search_path')
+
+        if not search_path:
+            self.db_search_path = tuple(['public'])
+        elif isinstance(search_path, list):
+            self.db_search_path = tuple(search_path)
+        elif isinstance(search_path, str):
+            schema_names = [schema_name.strip()
+                            for schema_name in search_path.split(',')]
+            self.db_search_path = tuple(schema_names)
+
         self._db_password = parameters.get('password')
         self.db_options = options
 
