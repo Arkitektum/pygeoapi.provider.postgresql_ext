@@ -1,6 +1,10 @@
-from typing import Dict
+from typing import Dict, List, Any
 from osgeo.osr import CoordinateTransformation, SpatialReference
+from sqlalchemy.orm import Session
+from cachetools import cached, TTLCache, keys
 from pygeoapi.util import CrsTransformSpec
+
+_sessions_cache = TTLCache(maxsize=640*1024, ttl=86400)
 
 
 def get_coordinate_transformation(crs_transform_spec: CrsTransformSpec | None) -> CoordinateTransformation | None:
@@ -35,6 +39,20 @@ def add_geojson_crs(geojson: Dict, epsg: str) -> None:
     }
 
 
+@cached(cache=_sessions_cache, key=lambda table_model, id_field, session: keys.hashkey(table_model))
+def get_table_ids(table_model, id_field, session: Session) -> List[Any]:
+    id_column = getattr(table_model, id_field)
+    result = session.query(id_column).order_by(id_column.asc())
+    ids = [str(r[0]) for r in result]
+
+    return ids
+
+
+def clear_cache(table_model) -> None:
+    key = keys.hashkey(table_model)
+    _sessions_cache.pop(key)
+
+
 def _get_epsg(wkt: str) -> str:
     sr: SpatialReference = SpatialReference()
     sr.ImportFromWkt(wkt)
@@ -46,5 +64,5 @@ def _get_epsg_from_uri(uri: str) -> str:
     return uri.split('/')[-1]
 
 
-__all__ = ['get_coordinate_transformation',
-           'get_target_epsg', 'add_geojson_crs']
+__all__ = ['get_coordinate_transformation', 'get_target_epsg',
+           'add_geojson_crs', 'get_table_ids', 'clear_cache', ]

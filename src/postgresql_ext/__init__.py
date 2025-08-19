@@ -81,7 +81,7 @@ from osgeo import ogr, osr
 import json
 from typing import Dict, List, Any
 
-from .helpers import get_coordinate_transformation, get_target_epsg, add_geojson_crs
+from .helpers import get_coordinate_transformation, get_target_epsg, add_geojson_crs, get_table_ids, clear_cache
 
 
 LOGGER = logging.getLogger(__name__)
@@ -326,19 +326,7 @@ class PostgreSQLExtendedProvider(BaseProvider):
                         props.pop(item)
 
             # Add fields for previous and next items
-            id_field = getattr(self.table_model, self.id_field)
-            prev_item = (session.query(self.table_model)
-                         .order_by(id_field.desc())
-                         .filter(id_field < identifier)
-                         .first())
-            next_item = (session.query(self.table_model)
-                         .order_by(id_field.asc())
-                         .filter(id_field > identifier)
-                         .first())
-            feature['prev'] = (getattr(prev_item, self.id_field)
-                               if prev_item is not None else identifier)
-            feature['next'] = (getattr(next_item, self.id_field)
-                               if next_item is not None else identifier)
+            self._set_prev_and_next(identifier, feature, session)
 
         return feature
 
@@ -581,6 +569,23 @@ class PostgreSQLExtendedProvider(BaseProvider):
         else:
             crs_transform = None
         return crs_transform
+
+    def _set_prev_and_next(self, identifier, feature: Dict, session: Session) -> None:
+        ids = get_table_ids(self.table_model, self.id_field, session)
+        index = ids.index(identifier)
+
+        if index + 1 == len(ids):
+            next = ids[0]
+        else:
+            next = ids[index + 1]
+
+        if index == 0:
+            prev = ids[-1]
+        else:
+            prev = ids[index - 1]
+
+        feature['prev'] = prev
+        feature['next'] = next
 
 
 @functools.cache

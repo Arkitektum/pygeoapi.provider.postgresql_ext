@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=75.0"]
+requires = ["setuptools>=80.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -10,15 +10,11 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "pygeoapi",
-    "sqlalchemy",
+    "SQLAlchemy>2.0",
     "geoalchemy2",
     "pygeofilter",
     "cachetools"
 ]
-
-[project.optional-dependencies]
-gdal-391 = ["gdal==3.9.1"]
-gdal-362 = ["gdal==3.6.2"]
 
 [tool.setuptools]
 license-files = []
