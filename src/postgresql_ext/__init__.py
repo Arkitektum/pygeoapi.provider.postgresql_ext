@@ -1,4 +1,3 @@
-import os
 import json
 from copy import deepcopy
 from datetime import datetime
@@ -13,7 +12,7 @@ from pygeofilter.backends.sqlalchemy.evaluate import to_filter
 import pyproj
 import shapely
 from osgeo import ogr, osr
-from sqlalchemy import create_engine, MetaData, PrimaryKeyConstraint, asc, desc, delete, text, select
+from sqlalchemy import create_engine, MetaData, PrimaryKeyConstraint, asc, desc, delete
 from sqlalchemy.engine import URL
 from sqlalchemy.exc import ConstraintColumnNotFoundError, InvalidRequestError, OperationalError
 from sqlalchemy.ext.automap import automap_base
@@ -156,9 +155,6 @@ class PostgreSQLExtendedProvider(BaseProvider):
 
         LOGGER.debug('Get available fields/properties')
 
-        # sql-schema only allows these types, so we need to map from sqlalchemy
-        # string, number, integer, object, array, boolean, null,
-        # https://json-schema.org/understanding-json-schema/reference/type.html
         column_type_map = {
             bool: 'boolean',
             datetime: 'string',
@@ -168,9 +164,9 @@ class PostgreSQLExtendedProvider(BaseProvider):
             int: 'integer',
             str: 'string'
         }
+
         default_type = 'string'
 
-        # https://json-schema.org/understanding-json-schema/reference/string#built-in-formats  # noqa
         column_format_map = {
             'date': 'date',
             'interval': 'duration',
@@ -224,9 +220,7 @@ class PostgreSQLExtendedProvider(BaseProvider):
         """
         LOGGER.debug(f'Get item by ID: {identifier}')
 
-        # Execute query within self-closing database Session context
         with Session(self._engine) as session:
-            # Retrieve data from database as feature
             item = session.get(self.table_model, identifier)
             if item is None:
                 msg = f"No such item: {self.id_field}={identifier}."
@@ -240,7 +234,6 @@ class PostgreSQLExtendedProvider(BaseProvider):
             feature = self._sqlalchemy_to_feature(
                 item, target_epsg, coord_trans)
 
-            # Drop non-defined properties
             if self.properties:
                 props = feature['properties']
                 dropping_keys = deepcopy(props).keys()
@@ -248,7 +241,6 @@ class PostgreSQLExtendedProvider(BaseProvider):
                     if item not in self.properties:
                         props.pop(item)
 
-            # Add fields for previous and next items
             self._set_prev_and_next(identifier, feature, session)
 
         return feature
@@ -271,7 +263,6 @@ class PostgreSQLExtendedProvider(BaseProvider):
             session.commit()
             result_id = getattr(new_instance, self.id_field)
 
-        # NOTE: need to use id from instance in case it's generated
         return result_id
 
     def update(self, identifier, item):
@@ -317,10 +308,6 @@ class PostgreSQLExtendedProvider(BaseProvider):
         self.db_host = parameters.get('host')
         self.db_port = parameters.get('port', 5432)
         self.db_name = parameters.get('dbname')
-
-        # db_search_path gets converted to a tuple here in order to ensure it
-        # is hashable - which allows us to use functools.cache() when
-        # reflecting the table definition from the DB
 
         search_path = parameters.get('search_path')
 
