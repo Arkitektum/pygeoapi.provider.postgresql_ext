@@ -107,7 +107,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             for item in items:
                 response['numberReturned'] += 1
                 response['features'].append(
-                    self._sqlalchemy_to_feature(item, target_epsg, coord_trans)
+                    self._sqlalchemy_to_feature_ext(item, target_epsg, coord_trans)
                 )
 
         return response
@@ -138,7 +138,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             coord_trans = _get_coordinate_transformation(
                 crs_transform_spec)
 
-            feature = self._sqlalchemy_to_feature(
+            feature = self._sqlalchemy_to_feature_ext(
                 item, target_epsg, coord_trans)
 
             _add_geojson_crs(feature, target_epsg)
@@ -157,7 +157,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         return feature
 
-    def _sqlalchemy_to_feature(self, item, target_epsg: str, coord_trans: osr.CoordinateTransformation | None):
+    def _sqlalchemy_to_feature_ext(self, item, target_epsg: str, coord_trans: osr.CoordinateTransformation | None):
         feature: Dict = {
             'type': 'Feature'
         }
