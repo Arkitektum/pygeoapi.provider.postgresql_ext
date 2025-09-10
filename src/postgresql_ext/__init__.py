@@ -1,28 +1,43 @@
 import json
 from copy import deepcopy
 import time
-from typing import Dict, List, Any
+import logging
+import xml.etree.ElementTree as ET
+from typing import Dict, List, Tuple, Any
 from osgeo import ogr, osr
+from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 from geoalchemy2 import WKBElement
 from cachetools import cached, TTLCache, keys
 from pygeoapi.provider.base import ProviderItemNotFoundError
 from pygeoapi.provider.sql import PostgreSQLProvider
 from pygeoapi.util import CrsTransformSpec
+import requests
 
 ogr.UseExceptions()
 osr.UseExceptions()
 
 _sessions_cache = TTLCache(maxsize=640*1024, ttl=86400)
 
+LOGGER = logging.getLogger(__name__)
+
 
 class PostgreSQLExtendedProvider(PostgreSQLProvider):
     """
-    A provider for querying a PostgreSQL database. With support for nonlinear geometry types
+    A provider for querying a PostgreSQL database. 
+      * Supports nonlinear geometry types      
+      * Supports field mappings from other tables or GML codelists
+      * Caches table IDs for faster creation of fields for previous and next items
     """
 
     def __init__(self, provider_def: dict):
         super().__init__(provider_def)
+
+        field_mappings = provider_def.get('field_mappings', [])
+        namespace = self._get_collection_namespace()
+
+        self.field_mapping_data = _get_field_mapping_data(field_mappings, namespace,
+                                                          self._engine, self.db_search_path[0])
 
     def query(
         self,
@@ -107,7 +122,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             for item in items:
                 response['numberReturned'] += 1
                 response['features'].append(
-                    self._sqlalchemy_to_feature_ext(item, target_epsg, coord_trans)
+                    self._sqlalchemy_to_feature_ext(
+                        item, target_epsg, coord_trans)
                 )
 
         return response
@@ -190,6 +206,9 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             feature['geometry'] = None
 
         feature['id'] = item_dict.pop(self.id_field)
+
+        self._add_mapped_values(item_dict)
+
         feature['properties'] = item_dict
 
         return feature
@@ -210,6 +229,21 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         feature['prev'] = prev
         feature['next'] = next
+
+    def _add_mapped_values(self, item_dict: Dict) -> None:
+        if not self.field_mapping_data:
+            return
+
+        for key, data in self.field_mapping_data.items():
+            if not key in item_dict:
+                continue
+
+            value = item_dict[key]
+            mapped_value = next((tup for tup in data if tup[0] == str(value)), None)
+            item_dict[key] = mapped_value[1] if mapped_value else value
+
+    def _get_collection_namespace(self) -> str:
+        return f'{self.db_name}.{self.db_search_path[0]}.{self.table}'
 
 
 def _get_coordinate_transformation(crs_transform_spec: CrsTransformSpec | None) -> osr.CoordinateTransformation | None:
@@ -262,3 +296,87 @@ def _get_table_ids(table_model, id_field, session: Session) -> List[Any]:
     ids = [str(r[0]) for r in result]
 
     return ids
+
+
+@cached(cache=_sessions_cache, key=lambda field_mappings, namespace, engine, db_search_path: keys.hashkey(namespace))
+def _get_field_mapping_data(field_mappings: Dict[str, Dict[str, str]], namespace: str, engine: Engine, db_search_path: str) -> Dict[str, List[Tuple]]:
+    mapping_data: Dict[str, List[Tuple]] = {}
+
+    if not field_mappings:
+        return mapping_data
+
+    codelist_mappings = [
+        item for item in field_mappings.items() if 'codelist' in item[1]]
+
+    if codelist_mappings:
+        codelist_mapping_data = _create_field_mapping_data_from_codelists(
+            codelist_mappings)
+        mapping_data.update(codelist_mapping_data)
+
+    table_mappings = [item for item in field_mappings.items()
+                      if 'table' in item[1]]
+
+    if table_mappings:
+        table_mapping_data = _create_field_mapping_data_from_tables(
+            engine, db_search_path, table_mappings)
+        mapping_data.update(table_mapping_data)
+
+    return mapping_data
+
+
+def _create_field_mapping_data_from_tables(engine: Engine, db_search_path: str, table_mappings: List[Tuple[str, Dict]]) -> Dict[str, List[Tuple]]:
+    mapping_data: Dict[str, List[Tuple]] = {}
+
+    with engine.connect() as connection:
+        for key, value in table_mappings:
+            try:
+                sql = f'SELECT {value.get('id_field')}, {value.get('value_field')} FROM {db_search_path}.{value.get('table')}'
+                result = connection.execute(text(sql))
+                rows = result.fetchall()
+                values = [tuple(row) for row in rows]
+                mapping_data[key] = values
+            except Exception as err:
+                LOGGER.warning(
+                    f'Could not create mapping data from table {value.get('table')}: {err}')
+
+    return mapping_data
+
+
+def _create_field_mapping_data_from_codelists(codelist_mappings: List[Tuple[str, Dict[str, str]]]) -> Dict[str, List[Tuple]]:
+    mapping_data: Dict[str, List[Tuple]] = {}
+
+    for key, value in codelist_mappings:
+        url = value.get('codelist')
+
+        if not url:
+            continue
+
+        try:
+            mapping_data[key] = _get_codelist(url)
+        except Exception as err:
+            LOGGER.warning(
+                f'Could not create mapping data from codelist {url}: {err}')
+
+    return mapping_data
+
+
+def _get_codelist(url: str) -> List[Tuple[str, str]]:
+    response = requests.get(url)
+    response.raise_for_status()
+
+    root = ET.fromstring(response.text)
+    ns = {'gml': 'http://www.opengis.net/gml/3.2'}
+    codelist: List[Tuple[str, str]] = []
+
+    for definition in root.findall('gml:dictionaryEntry/gml:Definition', ns):
+        id = definition.findtext('gml:identifier', namespaces=ns)
+        name = definition.findtext('gml:name', namespaces=ns)
+
+        if not id or not name:
+            continue
+
+        codelist.append((id.strip(), name.strip()))
+
+    codelist.sort(key=lambda entry: entry[0])
+
+    return codelist
