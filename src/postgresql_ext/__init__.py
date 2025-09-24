@@ -1,18 +1,17 @@
 import json
 from copy import deepcopy
-import time
 import logging
 import xml.etree.ElementTree as ET
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 from osgeo import ogr, osr
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 from geoalchemy2 import WKBElement
 from cachetools import cached, TTLCache, keys
+import requests
 from pygeoapi.provider.base import ProviderItemNotFoundError
 from pygeoapi.provider.sql import PostgreSQLProvider
-from pygeoapi.util import CrsTransformSpec
-import requests
+from pygeoapi.util import CrsTransformSpec, get_crs_from_uri
 
 ogr.UseExceptions()
 osr.UseExceptions()
@@ -46,13 +45,13 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         resulttype='results',
         bbox=[],
         datetime_=None,
-        properties=[],
-        sortby=[],
-        select_properties=[],
+        properties: List[Tuple[str, str]] = [],
+        sortby: List[Dict[str, Any]] = [],
+        select_properties: List[str] = [],
         skip_geometry=False,
         q=None,
         filterq=None,
-        crs_transform_spec=None,
+        crs_transform_spec: Optional[CrsTransformSpec] = None,
         **kwargs
     ):
         """
@@ -76,10 +75,10 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         :returns: GeoJSON FeatureCollection
         """
 
-        property_filters = self._get_property_filters(properties)
-        cql_filters = self._get_cql_filters(filterq)
-        bbox_filter = self._get_bbox_filter(bbox)
-        time_filter = self._get_datetime_filter(datetime_)
+        property_filters: Any = self._get_property_filters(properties)
+        cql_filters: Any = self._get_cql_filters(filterq)
+        bbox_filter: Any = self._get_bbox_filter(bbox)
+        time_filter: Any = self._get_datetime_filter(datetime_)
         order_by_clauses = self._get_order_by_clauses(sortby, self.table_model)
         selected_properties = self._select_properties_clause(
             select_properties, skip_geometry
@@ -97,14 +96,12 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
             matched = results.count()
 
-            response: Dict = {
-                'type': 'FeatureCollection',
+            response: Dict[str, Any] = {
+                'type': 'FeatureCollection'
             }
 
-            target_epsg = _get_target_epsg(
-                crs_transform_spec, self.storage_crs)
-
-            _add_geojson_crs(response, target_epsg)
+            crs_uri = crs_transform_spec.target_crs_uri if crs_transform_spec else self.storage_crs
+            _add_geojson_crs(response, crs_uri)
 
             response['features'] = []
             response['numberMatched'] = matched
@@ -112,6 +109,9 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
             if resulttype == 'hits' or not results:
                 return response
+
+            target_crs = _get_target_crs(
+                crs_transform_spec, self.storage_crs)
 
             coord_trans = _get_coordinate_transformation(
                 crs_transform_spec)
@@ -122,13 +122,13 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             for item in items:
                 response['numberReturned'] += 1
                 response['features'].append(
-                    self._sqlalchemy_to_feature_ext(
-                        item, target_epsg, coord_trans)
+                    self._create_feature(
+                        item, target_crs, coord_trans)
                 )
 
         return response
 
-    def get(self, identifier, crs_transform_spec=None, **kwargs):
+    def get(self, identifier, crs_transform_spec: Optional[CrsTransformSpec] = None, **kwargs):
         """
         Query the provider for a specific
         feature id e.g: /collections/hotosm_bdi_waterways/items/13990765
@@ -138,26 +138,25 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         :returns: GeoJSON FeatureCollection
         """
-        start = time.time()
 
-        # Execute query within self-closing database Session context
         with Session(self._engine) as session:
-            # Retrieve data from database as feature
             item = session.get(self.table_model, identifier)
 
             if item is None:
                 msg = f'No such item: {self.id_field}={identifier}.'
                 raise ProviderItemNotFoundError(msg)
 
-            target_epsg = _get_target_epsg(
+            target_crs = _get_target_crs(
                 crs_transform_spec, self.storage_crs)
+
             coord_trans = _get_coordinate_transformation(
                 crs_transform_spec)
 
-            feature = self._sqlalchemy_to_feature_ext(
-                item, target_epsg, coord_trans)
+            feature = self._create_feature(
+                item, target_crs, coord_trans)
 
-            _add_geojson_crs(feature, target_epsg)
+            crs_uri = crs_transform_spec.target_crs_uri if crs_transform_spec else self.storage_crs
+            _add_geojson_crs(feature, crs_uri)
 
             if self.properties:
                 props: Dict = feature['properties']
@@ -169,16 +168,14 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
             self._set_prev_and_next(identifier, feature, session)
 
-        print(f'Got feature in {round(time.time() - start, 2)} sec.')
-
         return feature
 
-    def _sqlalchemy_to_feature_ext(self, item, target_epsg: str, coord_trans: osr.CoordinateTransformation | None):
-        feature: Dict = {
+    def _create_feature(self, item: Any, target_crs: str, coord_trans: osr.CoordinateTransformation | None) -> Dict[str, Any]:
+        feature: Dict[str, Any] = {
             'type': 'Feature'
         }
 
-        item_dict: Dict = item.__dict__
+        item_dict: Dict[str, Any] = item.__dict__
         item_dict.pop('_sa_instance_state')
 
         if item_dict.get(self.geom):
@@ -190,18 +187,17 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             if coord_trans:
                 linear_geom.Transform(coord_trans)
 
-            if target_epsg == '4326':
+            if target_crs == 'EPSG:4326':
                 linear_geom.SwapXY()
 
-            if target_epsg in ['4326', 'CRS84']:
+            if target_crs in ['OGC:CRS84', 'EPSG:4326']:
                 coord_precision = 'COORDINATE_PRECISION=6'
             else:
                 coord_precision = 'COORDINATE_PRECISION=2'
 
             json_str = linear_geom.ExportToJson([coord_precision])
-            geojson_geom = json.loads(json_str)
 
-            feature['geometry'] = geojson_geom
+            feature['geometry'] = json.loads(json_str)
         else:
             feature['geometry'] = None
 
@@ -217,15 +213,15 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         ids = _get_table_ids(self.table_model, self.id_field, session)
         index = ids.index(identifier)
 
-        if index + 1 == len(ids):
-            next = ids[0]
-        else:
-            next = ids[index + 1]
-
         if index == 0:
             prev = ids[-1]
         else:
             prev = ids[index - 1]
+
+        if index + 1 == len(ids):
+            next = ids[0]
+        else:
+            next = ids[index + 1]
 
         feature['prev'] = prev
         feature['next'] = next
@@ -239,7 +235,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 continue
 
             value = item_dict[key]
-            mapped_value = next((tup for tup in data if tup[0] == str(value)), None)
+            mapped_value = next(
+                (tup for tup in data if tup[0] == str(value)), None)
             item_dict[key] = mapped_value[1] if mapped_value else value
 
     def _get_collection_namespace(self) -> str:
@@ -259,34 +256,22 @@ def _get_coordinate_transformation(crs_transform_spec: CrsTransformSpec | None) 
     return osr.CoordinateTransformation(source, target)
 
 
-def _get_target_epsg(crs_transform_spec: CrsTransformSpec | None, storage_crs: str) -> str:
-    if crs_transform_spec:
-        return _get_epsg(crs_transform_spec.target_crs_wkt)
-
-    return _get_epsg_from_uri(storage_crs)
+def _get_target_crs(crs_transform_spec: CrsTransformSpec | None, storage_crs: str) -> str:
+    return str(get_crs_from_uri(crs_transform_spec.target_crs_uri if crs_transform_spec else storage_crs))
 
 
-def _add_geojson_crs(geojson: Dict, epsg: str) -> None:
-    if epsg is None or epsg == 'CRS84':
+def _add_geojson_crs(geojson: Dict[str, Any], crs_uri: str) -> None:
+    crs = get_crs_from_uri(crs_uri)
+
+    if crs.to_string() == 'OGC:CRS84':
         return
 
     geojson['crs'] = {
         'type': 'name',
         'properties': {
-            'name': 'urn:ogc:def:crs:EPSG::' + epsg
+            'name': f'urn:ogc:def:crs:EPSG::{crs.to_epsg() or 4326}'
         }
     }
-
-
-def _get_epsg(wkt: str) -> str:
-    sr: osr.SpatialReference = osr.SpatialReference()
-    sr.ImportFromWkt(wkt)
-
-    return sr.GetAuthorityCode(None)
-
-
-def _get_epsg_from_uri(uri: str) -> str:
-    return uri.split('/')[-1]
 
 
 @cached(cache=_sessions_cache, key=lambda table_model, id_field, session: keys.hashkey(table_model))
