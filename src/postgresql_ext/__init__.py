@@ -37,6 +37,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         self.field_mapping_data = _get_field_mapping_data(field_mappings, namespace,
                                                           self._engine, self.db_search_path[0])
+        self.navigation_templates = _normalize_navigation_config(
+            provider_def.get('navigation'))
 
     def query(
         self,
@@ -201,11 +203,13 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         else:
             feature['geometry'] = None
 
-        feature['id'] = item_dict.pop(self.id_field)
+        feature_id = item_dict.pop(self.id_field)
+        feature['id'] = feature_id
 
         self._add_mapped_values(item_dict)
 
         feature['properties'] = item_dict
+        self._add_navigation_links(feature, feature_id)
 
         return feature
 
@@ -238,6 +242,32 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             mapped_value = next(
                 (tup for tup in data if tup[0] == str(value)), None)
             item_dict[key] = mapped_value[1] if mapped_value else value
+
+    def _add_navigation_links(self, feature: Dict[str, Any], feature_id: Any) -> None:
+        if not getattr(self, 'navigation_templates', None):
+            return
+
+        navigation: Dict[str, str] = {}
+        format_context: Dict[str, Any] = {'id': feature_id}
+
+        properties = feature.get('properties', {})
+
+        if isinstance(properties, dict):
+            format_context.update(properties)
+
+        for tag, template in self.navigation_templates.items():
+            try:
+                navigation[tag] = template.format_map(format_context)
+            except KeyError as err:
+                missing = err.args[0]
+                LOGGER.warning(
+                    f'Navigation template "{tag}" for {self.id_field}={feature_id} is missing property "{missing}".')
+            except Exception as err:
+                LOGGER.warning(
+                    f'Navigation template "{tag}" for {self.id_field}={feature_id} could not be resolved: {err}')
+
+        if navigation:
+            feature['navigation'] = navigation
 
     def _get_collection_namespace(self) -> str:
         return f'{self.db_name}.{self.db_search_path[0]}.{self.table}'
@@ -365,3 +395,39 @@ def _get_codelist(url: str) -> List[Tuple[str, str]]:
     codelist.sort(key=lambda entry: entry[0])
 
     return codelist
+
+
+def _normalize_navigation_config(navigation_definition: Any) -> Dict[str, str]:
+    templates: Dict[str, str] = {}
+
+    if not navigation_definition:
+        return templates
+
+    if isinstance(navigation_definition, dict):
+        for key, value in navigation_definition.items():
+            if isinstance(value, str):
+                templates[key] = value
+                continue
+
+            if isinstance(value, dict):
+                template = value.get('template') or value.get(
+                    'href') or value.get('path')
+
+                if template:
+                    templates[key] = template
+
+        return templates
+
+    if isinstance(navigation_definition, list):
+        for item in navigation_definition:
+            if not isinstance(item, dict):
+                continue
+
+            key = item.get('tag') or item.get('rel') or item.get('name')
+            template = item.get('template') or item.get(
+                'href') or item.get('path')
+
+            if key and template:
+                templates[key] = template
+
+    return templates
