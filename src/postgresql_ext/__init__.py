@@ -40,6 +40,11 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                                                           self._engine, self.db_search_path[0])
         self.link_templates = _normalize_link_config(
             provider_def.get('links'))
+        self.links_base_url = (
+            provider_def.get('links_base')
+            or provider_def.get('links_base_url')
+            or provider_def.get('base_url')
+        )
 
     def query(
         self,
@@ -87,6 +92,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             select_properties, skip_geometry
         )
 
+        links_base = _determine_links_base_url(kwargs, self.links_base_url)
+
         with Session(self._engine) as session:
             results = (
                 session.query(self.table_model)
@@ -126,7 +133,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 response['numberReturned'] += 1
                 response['features'].append(
                     self._create_feature(
-                        item, target_crs, coord_trans)
+                        item, target_crs, coord_trans, links_base)
                 )
 
         return response
@@ -149,6 +156,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 msg = f'No such item: {self.id_field}={identifier}.'
                 raise ProviderItemNotFoundError(msg)
 
+            links_base = _determine_links_base_url(kwargs, self.links_base_url)
+
             target_crs = _get_target_crs(
                 crs_transform_spec, self.storage_crs)
 
@@ -156,7 +165,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 crs_transform_spec)
 
             feature = self._create_feature(
-                item, target_crs, coord_trans)
+                item, target_crs, coord_trans, links_base)
 
             crs_uri = crs_transform_spec.target_crs_uri if crs_transform_spec else self.storage_crs
             _add_geojson_crs(feature, crs_uri)
@@ -173,7 +182,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         return feature
 
-    def _create_feature(self, item: Any, target_crs: str, coord_trans: osr.CoordinateTransformation | None) -> Dict[str, Any]:
+    def _create_feature(self, item: Any, target_crs: str, coord_trans: osr.CoordinateTransformation | None, links_base: Optional[str] = None) -> Dict[str, Any]:
         feature: Dict[str, Any] = {
             'type': 'Feature'
         }
@@ -210,7 +219,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         self._add_mapped_values(item_dict)
 
         feature['properties'] = item_dict
-        self._add_provider_links(feature, feature_id)
+        self._add_provider_links(feature, feature_id, links_base)
 
         return feature
 
@@ -268,7 +277,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 (tup for tup in data if tup[0] == str(value)), None)
             item_dict[key] = mapped_value[1] if mapped_value else value
 
-    def _add_provider_links(self, feature: Dict[str, Any], feature_id: Any) -> None:
+    def _add_provider_links(self, feature: Dict[str, Any], feature_id: Any, links_base: Optional[str]) -> None:
         if not getattr(self, 'link_templates', None):
             return
 
@@ -288,7 +297,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 link_candidates.append(rendered)
 
         if link_candidates:
-            _merge_links(feature, link_candidates)
+            _merge_links(feature, link_candidates, links_base)
 
     def _get_collection_namespace(self) -> str:
         return f'{self.db_name}.{self.db_search_path[0]}.{self.table}'
@@ -341,7 +350,74 @@ def _find_identifier_index(ids: List[Any], identifier: str) -> Optional[int]:
         return None
 
 
-def _merge_links(feature: Dict[str, Any], candidates: List[Dict[str, Any]]) -> None:
+def _determine_links_base_url(kwargs: Dict[str, Any], provider_base: Optional[str]) -> Optional[str]:
+    if not isinstance(kwargs, dict):
+        kwargs = {}
+
+    candidates: List[str] = []
+
+    request = kwargs.get('request')
+
+    if request is not None:
+        for attr in ('url_root', 'host_url', 'base_url', 'url'):
+            value = getattr(request, attr, None)
+
+            if callable(value):
+                try:
+                    value = value()
+                except Exception:
+                    value = None
+
+            if value:
+                candidates.append(str(value))
+
+    for key in ('request_url_root', 'request_url', 'url_root', 'base_url', 'url'):
+        value = kwargs.get(key)
+
+        if value:
+            candidates.append(str(value))
+
+    headers = kwargs.get('headers') or kwargs.get('request_headers')
+
+    if isinstance(headers, dict):
+        proto = headers.get('X-Forwarded-Proto') or headers.get('Forwarded-Proto')
+        host = headers.get('X-Forwarded-Host') or headers.get('Host')
+
+        if proto and host:
+            candidates.append(f'{proto}://{host}/')
+
+        forwarded = headers.get('Forwarded')
+
+        if isinstance(forwarded, str):
+            first_entry = forwarded.split(',', 1)[0]
+            parts: Dict[str, str] = {}
+
+            for element in first_entry.split(';'):
+                if '=' not in element:
+                    continue
+
+                key, value = element.split('=', 1)
+                parts[key.strip().lower()] = value.strip()
+
+            proto = parts.get('proto')
+            host = parts.get('host')
+
+            if proto and host:
+                candidates.append(f'{proto}://{host}/')
+
+    if provider_base:
+        candidates.append(str(provider_base))
+
+    for candidate in candidates:
+        base = _normalize_base_href(candidate)
+
+        if base:
+            return base
+
+    return None
+
+
+def _merge_links(feature: Dict[str, Any], candidates: List[Dict[str, Any]], base_href: Optional[str]) -> None:
     links = feature.setdefault('links', [])
 
     if not isinstance(links, list):
@@ -353,10 +429,12 @@ def _merge_links(feature: Dict[str, Any], candidates: List[Dict[str, Any]]) -> N
         if isinstance(link, dict)
     }
 
-    base_href = _get_link_base_href(links)
+    normalized_base = _normalize_base_href(base_href)
+    existing_base = _get_link_base_href(links)
+    fallback_base = existing_base or normalized_base
 
     for candidate in candidates:
-        prepared = _prepare_link(candidate, base_href)
+        prepared = _prepare_link(candidate, normalized_base, fallback_base)
 
         if not prepared:
             continue
@@ -381,36 +459,15 @@ def _get_link_base_href(links: List[Dict[str, Any]]) -> Optional[str]:
 
             href = link.get('href')
 
-            if not href:
-                continue
+            base = _derive_base_href(href)
 
-            parts = urlsplit(href)
-
-            if not parts.scheme or not parts.netloc:
-                continue
-
-            marker = '/collections/'
-
-            base_path = parts.path
-
-            if marker in base_path:
-                base_path = base_path[:base_path.index(marker)]
-            else:
-                base_path = base_path.rsplit('/', 1)[0]
-
-            if not base_path or base_path == '/':
-                normalized_path = '/'
-            else:
-                normalized_path = base_path.rstrip('/') + '/'
-
-            return urlunsplit(
-                (parts.scheme, parts.netloc, normalized_path, '', '')
-            )
+            if base:
+                return base
 
     return None
 
 
-def _prepare_link(candidate: Dict[str, Any], base_href: Optional[str]) -> Optional[Dict[str, Any]]:
+def _prepare_link(candidate: Dict[str, Any], primary_base: Optional[str], fallback_base: Optional[str]) -> Optional[Dict[str, Any]]:
     if not isinstance(candidate, dict):
         return None
 
@@ -419,12 +476,28 @@ def _prepare_link(candidate: Dict[str, Any], base_href: Optional[str]) -> Option
     if not href_value:
         return None
 
-    resolved_href = _resolve_link_href(href_value, base_href)
+    prepared = deepcopy(candidate)
+    resolved_href = href_value if _is_absolute_href(href_value) else None
+
+    base_candidates: List[str] = []
+
+    for base in (primary_base, fallback_base):
+        normalized = _normalize_base_href(base)
+
+        if normalized:
+            base_candidates.append(normalized)
 
     if not resolved_href:
+        for base in base_candidates:
+            resolved_href = _resolve_link_href(href_value, base)
+
+            if _is_absolute_href(resolved_href):
+                break
+
+    if not resolved_href or not _is_absolute_href(resolved_href):
+        LOGGER.warning('Link href "%s" could not be resolved to an absolute URL.', href_value)
         return None
 
-    prepared = deepcopy(candidate)
     prepared['href'] = resolved_href
     prepared['rel'] = prepared.get('rel') or 'related'
     prepared.setdefault('type', 'application/json')
@@ -463,6 +536,56 @@ def _resolve_link_href(target: str, base_href: Optional[str]) -> str:
             return joined
 
     return target
+
+
+def _normalize_base_href(base_href: Optional[str]) -> Optional[str]:
+    if not base_href:
+        return None
+
+    try:
+        base = _derive_base_href(str(base_href))
+    except Exception:
+        return None
+
+    return base
+
+
+def _derive_base_href(url: Optional[str]) -> Optional[str]:
+    if not url:
+        return None
+
+    parts = urlsplit(url)
+
+    if not parts.scheme or not parts.netloc:
+        return None
+
+    marker = '/collections/'
+    path = parts.path or '/'
+
+    if marker in path:
+        path = path[:path.index(marker)]
+
+    if not path:
+        path = '/'
+
+    path = path.rstrip('/')
+
+    if not path:
+        path = '/'
+
+    if not path.endswith('/'):
+        path = f'{path}/'
+
+    return urlunsplit((parts.scheme, parts.netloc, path, '', ''))
+
+
+def _is_absolute_href(href: Optional[str]) -> bool:
+    if not href:
+        return False
+
+    parts = urlsplit(str(href))
+
+    return bool(parts.scheme and parts.netloc)
 
 
 def _render_link_template(template: Dict[str, Any], context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -620,4 +743,3 @@ def _get_codelist(url: str) -> List[Tuple[str, str]]:
     codelist.sort(key=lambda entry: entry[0])
 
     return codelist
-

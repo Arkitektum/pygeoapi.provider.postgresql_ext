@@ -22,22 +22,22 @@ providers:
     data:
       id_field: your_id
       table: parent_collection_table
+      links_base: "https://example.com/vorpah/"
       links:
         - rel: related
           href: "collections/child-collection/items?foreignKey={foreign_key_prop}"
           title: "child"
         - rel: related
           href: "collections/parent-collection/items/{id}"
-          title:
-            en: "Parent for {id}"
-            nb: "Forelder for {id}"
+          title: "Parent for {id}"
 ```
 
 When features are returned (both for `query` and `get` requests) every link
-template renders an entry in the feature `links` array. The rendered template
-becomes the `href`, with defaults `rel: "related"` and `type: "application/json"`
-unless you override them. You can also supply translated titles or other
-metadata; nested dictionaries and lists are rendered recursively.
+template renders an entry in the feature `links` array. The rendered template is
+resolved to an absolute `href`, with defaults `rel: "related"` and
+`type: "application/json"` unless you override them. You can also supply custom
+titles or other metadata; nested dictionaries and lists are rendered
+recursively.
 
 ```json
 {
@@ -66,4 +66,6 @@ If a template references an unknown property, the entry is skipped and a warning
 is logged. This allows you to define different related links per collection
 without breaking responses when some attributes are missing. Use any `rel`
 values that make sense for your API; `related` is the default when none is
-provided.
+provided. To force a specific base URL (for example when running behind a
+reverse proxy) supply `links_base` in the provider configuration; otherwise the
+current request URL is used.
