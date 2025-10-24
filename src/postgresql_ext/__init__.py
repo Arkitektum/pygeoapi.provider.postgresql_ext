@@ -3,6 +3,7 @@ from copy import deepcopy
 import logging
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Tuple, Any, Optional
+from urllib.parse import urljoin, urlsplit, urlunsplit
 from osgeo import ogr, osr
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
@@ -292,6 +293,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         if navigation:
             feature['navigation'] = navigation
+            _extend_links_with_navigation(feature, navigation)
 
     def _get_collection_namespace(self) -> str:
         return f'{self.db_name}.{self.db_search_path[0]}.{self.table}'
@@ -342,6 +344,116 @@ def _find_identifier_index(ids: List[Any], identifier: str) -> Optional[int]:
         return ids.index(identifier)
     except ValueError:
         return None
+
+
+def _extend_links_with_navigation(feature: Dict[str, Any], navigation: Dict[str, str]) -> None:
+    links = feature.setdefault('links', [])
+
+    if not isinstance(links, list):
+        return
+
+    existing_links = {
+        (link.get('rel'), link.get('href'))
+        for link in links
+        if isinstance(link, dict)
+    }
+
+    base_href = _get_navigation_base_href(links)
+
+    for nav_key, target in navigation.items():
+        href = _resolve_navigation_href(target, base_href)
+        if not href:
+            continue
+
+        link_rel = 'related'
+
+        if (link_rel, href) in existing_links:
+            continue
+
+        link_entry: Dict[str, Any] = {
+            'rel': link_rel,
+            'href': href,
+            'type': 'text/html'
+        }
+
+        if nav_key:
+            link_entry['title'] = nav_key
+
+        links.append(link_entry)
+        existing_links.add((link_rel, href))
+
+
+def _get_navigation_base_href(links: List[Dict[str, Any]]) -> Optional[str]:
+    for rel_name in ('self', 'collection'):
+        for link in links:
+            if not isinstance(link, dict):
+                continue
+
+            if link.get('rel') != rel_name:
+                continue
+
+            href = link.get('href')
+
+            if not href:
+                continue
+
+            parts = urlsplit(href)
+
+            if not parts.scheme or not parts.netloc:
+                continue
+
+            marker = '/collections/'
+
+            base_path = parts.path
+
+            if marker in base_path:
+                base_path = base_path[:base_path.index(marker)]
+            else:
+                base_path = base_path.rsplit('/', 1)[0]
+
+            if not base_path or base_path == '/':
+                normalized_path = '/'
+            else:
+                normalized_path = base_path.rstrip('/') + '/'
+
+            return urlunsplit(
+                (parts.scheme, parts.netloc, normalized_path, '', '')
+            )
+
+    return None
+
+
+def _resolve_navigation_href(target: str, base_href: Optional[str]) -> str:
+    if not target:
+        return ''
+
+    target_parts = urlsplit(target)
+
+    if target_parts.scheme:
+        return target
+
+    if base_href:
+        base_parts = urlsplit(base_href)
+
+        if target_parts.path.startswith('/'):
+            combined_path = (
+                base_parts.path.rstrip('/') + target_parts.path
+            ) or '/'
+
+            return urlunsplit((
+                base_parts.scheme,
+                base_parts.netloc,
+                combined_path,
+                target_parts.query,
+                target_parts.fragment
+            ))
+
+        joined = urljoin(base_href, target)
+
+        if joined:
+            return joined
+
+    return target
 
 
 @cached(cache=_sessions_cache, key=lambda field_mappings, namespace, engine, db_search_path: keys.hashkey(namespace))

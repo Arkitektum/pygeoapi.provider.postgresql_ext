@@ -28,7 +28,12 @@ providers:
 ```
 
 When features are returned (both for `query` and `get` requests) an extra
-`navigation` member is added alongside the standard GeoJSON members:
+`navigation` member is added alongside the standard GeoJSON members. Each
+navigation entry is also appended to the feature `links` array. Links whose
+rendered template includes a query string (`?`) receive `rel: "items"`, others
+receive `rel: "item"`. The navigation key is persisted as the link `title`, and
+the rendered template becomes the `href` (default media type
+`application/json`):
 
 ```json
 {
