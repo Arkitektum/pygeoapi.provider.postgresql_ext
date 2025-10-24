@@ -210,15 +210,39 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         return feature
 
     def _set_prev_and_next(self, identifier, feature: Dict, session: Session) -> None:
+        identifier_str = str(identifier)
         ids = _get_table_ids(self.table_model, self.id_field, session)
-        index = ids.index(identifier)
 
-        if index == 0:
+        index = _find_identifier_index(ids, identifier_str)
+
+        if index is None:
+            cache = getattr(_get_table_ids, 'cache', None)
+            cache_key = keys.hashkey(self.table_model)
+
+            if cache is not None:
+                cache.pop(cache_key, None)
+
+            ids = _get_table_ids(self.table_model, self.id_field, session)
+            index = _find_identifier_index(ids, identifier_str)
+
+        if index is None:
+            LOGGER.warning(
+                'ID "%s" not found in cached list for %s; skipping prev/next generation.',
+                identifier,
+                getattr(self.table_model, '__tablename__', self.table_model),
+            )
+            return
+
+        if len(ids) == 1:
+            prev = ids[0]
+        elif index == 0:
             prev = ids[-1]
         else:
             prev = ids[index - 1]
 
-        if index + 1 == len(ids):
+        if len(ids) == 1:
+            next = ids[0]
+        elif index + 1 == len(ids):
             next = ids[0]
         else:
             next = ids[index + 1]
@@ -281,6 +305,13 @@ def _get_table_ids(table_model, id_field, session: Session) -> List[Any]:
     ids = [str(r[0]) for r in result]
 
     return ids
+
+
+def _find_identifier_index(ids: List[Any], identifier: str) -> Optional[int]:
+    try:
+        return ids.index(identifier)
+    except ValueError:
+        return None
 
 
 @cached(cache=_sessions_cache, key=lambda field_mappings, namespace, engine, db_search_path: keys.hashkey(namespace))
