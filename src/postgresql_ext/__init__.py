@@ -38,8 +38,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         self.field_mapping_data = _get_field_mapping_data(field_mappings, namespace,
                                                           self._engine, self.db_search_path[0])
-        self.navigation_templates = _normalize_navigation_config(
-            provider_def.get('navigation'))
+        self.link_templates = _normalize_link_config(
+            provider_def.get('links'))
 
     def query(
         self,
@@ -210,7 +210,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         self._add_mapped_values(item_dict)
 
         feature['properties'] = item_dict
-        self._add_navigation_links(feature, feature_id)
+        self._add_provider_links(feature, feature_id)
 
         return feature
 
@@ -268,11 +268,10 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 (tup for tup in data if tup[0] == str(value)), None)
             item_dict[key] = mapped_value[1] if mapped_value else value
 
-    def _add_navigation_links(self, feature: Dict[str, Any], feature_id: Any) -> None:
-        if not getattr(self, 'navigation_templates', None):
+    def _add_provider_links(self, feature: Dict[str, Any], feature_id: Any) -> None:
+        if not getattr(self, 'link_templates', None):
             return
 
-        navigation: Dict[str, str] = {}
         format_context: Dict[str, Any] = {'id': feature_id}
 
         properties = feature.get('properties', {})
@@ -280,20 +279,16 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         if isinstance(properties, dict):
             format_context.update(properties)
 
-        for tag, template in self.navigation_templates.items():
-            try:
-                navigation[tag] = template.format_map(format_context)
-            except KeyError as err:
-                missing = err.args[0]
-                LOGGER.warning(
-                    f'Navigation template "{tag}" for {self.id_field}={feature_id} is missing property "{missing}".')
-            except Exception as err:
-                LOGGER.warning(
-                    f'Navigation template "{tag}" for {self.id_field}={feature_id} could not be resolved: {err}')
+        link_candidates: List[Dict[str, Any]] = []
 
-        if navigation:
-            feature['navigation'] = navigation
-            _extend_links_with_navigation(feature, navigation)
+        for template in getattr(self, 'link_templates', []):
+            rendered = _render_link_template(template, format_context)
+
+            if rendered:
+                link_candidates.append(rendered)
+
+        if link_candidates:
+            _merge_links(feature, link_candidates)
 
     def _get_collection_namespace(self) -> str:
         return f'{self.db_name}.{self.db_search_path[0]}.{self.table}'
@@ -346,7 +341,7 @@ def _find_identifier_index(ids: List[Any], identifier: str) -> Optional[int]:
         return None
 
 
-def _extend_links_with_navigation(feature: Dict[str, Any], navigation: Dict[str, str]) -> None:
+def _merge_links(feature: Dict[str, Any], candidates: List[Dict[str, Any]]) -> None:
     links = feature.setdefault('links', [])
 
     if not isinstance(links, list):
@@ -358,32 +353,24 @@ def _extend_links_with_navigation(feature: Dict[str, Any], navigation: Dict[str,
         if isinstance(link, dict)
     }
 
-    base_href = _get_navigation_base_href(links)
+    base_href = _get_link_base_href(links)
 
-    for nav_key, target in navigation.items():
-        href = _resolve_navigation_href(target, base_href)
-        if not href:
+    for candidate in candidates:
+        prepared = _prepare_link(candidate, base_href)
+
+        if not prepared:
             continue
 
-        link_rel = 'related'
+        key = (prepared.get('rel'), prepared.get('href'))
 
-        if (link_rel, href) in existing_links:
+        if key in existing_links:
             continue
 
-        link_entry: Dict[str, Any] = {
-            'rel': link_rel,
-            'href': href,
-            'type': 'text/html'
-        }
-
-        if nav_key:
-            link_entry['title'] = nav_key
-
-        links.append(link_entry)
-        existing_links.add((link_rel, href))
+        links.append(prepared)
+        existing_links.add(key)
 
 
-def _get_navigation_base_href(links: List[Dict[str, Any]]) -> Optional[str]:
+def _get_link_base_href(links: List[Dict[str, Any]]) -> Optional[str]:
     for rel_name in ('self', 'collection'):
         for link in links:
             if not isinstance(link, dict):
@@ -423,7 +410,29 @@ def _get_navigation_base_href(links: List[Dict[str, Any]]) -> Optional[str]:
     return None
 
 
-def _resolve_navigation_href(target: str, base_href: Optional[str]) -> str:
+def _prepare_link(candidate: Dict[str, Any], base_href: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not isinstance(candidate, dict):
+        return None
+
+    href_value = candidate.get('href')
+
+    if not href_value:
+        return None
+
+    resolved_href = _resolve_link_href(href_value, base_href)
+
+    if not resolved_href:
+        return None
+
+    prepared = deepcopy(candidate)
+    prepared['href'] = resolved_href
+    prepared['rel'] = prepared.get('rel') or 'related'
+    prepared.setdefault('type', 'application/json')
+
+    return prepared
+
+
+def _resolve_link_href(target: str, base_href: Optional[str]) -> str:
     if not target:
         return ''
 
@@ -454,6 +463,79 @@ def _resolve_navigation_href(target: str, base_href: Optional[str]) -> str:
             return joined
 
     return target
+
+
+def _render_link_template(template: Dict[str, Any], context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(template, dict):
+        return None
+
+    rendered: Dict[str, Any] = {}
+
+    for key, value in template.items():
+        try:
+            rendered[key] = _format_template_value(value, context)
+        except KeyError as err:
+            missing = err.args[0]
+            LOGGER.warning(
+                'Link template field "%s" is missing property "%s".',
+                key,
+                missing
+            )
+            return None
+        except Exception as err:
+            LOGGER.warning(
+                'Link template field "%s" could not be resolved: %s',
+                key,
+                err
+            )
+            return None
+
+    if 'href' not in rendered:
+        return None
+
+    rendered.setdefault('rel', 'related')
+    rendered.setdefault('type', 'application/json')
+
+    return rendered
+
+
+def _format_template_value(value: Any, context: Dict[str, Any]) -> Any:
+    if isinstance(value, str):
+        return value.format_map(context)
+
+    if isinstance(value, dict):
+        return {
+            key: _format_template_value(sub_value, context)
+            for key, sub_value in value.items()
+        }
+
+    if isinstance(value, list):
+        formatted_list: List[Any] = []
+
+        for item in value:
+            formatted_list.append(_format_template_value(item, context))
+
+        return formatted_list
+
+    return value
+
+
+def _normalize_link_config(link_definition: Any) -> List[Dict[str, Any]]:
+    templates: List[Dict[str, Any]] = []
+
+    if not link_definition:
+        return templates
+
+    if isinstance(link_definition, dict):
+        templates.append(deepcopy(link_definition))
+        return templates
+
+    if isinstance(link_definition, list):
+        for item in link_definition:
+            if isinstance(item, dict):
+                templates.append(deepcopy(item))
+
+    return templates
 
 
 @cached(cache=_sessions_cache, key=lambda field_mappings, namespace, engine, db_search_path: keys.hashkey(namespace))
@@ -539,38 +621,3 @@ def _get_codelist(url: str) -> List[Tuple[str, str]]:
 
     return codelist
 
-
-def _normalize_navigation_config(navigation_definition: Any) -> Dict[str, str]:
-    templates: Dict[str, str] = {}
-
-    if not navigation_definition:
-        return templates
-
-    if isinstance(navigation_definition, dict):
-        for key, value in navigation_definition.items():
-            if isinstance(value, str):
-                templates[key] = value
-                continue
-
-            if isinstance(value, dict):
-                template = value.get('template') or value.get(
-                    'href') or value.get('path')
-
-                if template:
-                    templates[key] = template
-
-        return templates
-
-    if isinstance(navigation_definition, list):
-        for item in navigation_definition:
-            if not isinstance(item, dict):
-                continue
-
-            key = item.get('tag') or item.get('rel') or item.get('name')
-            template = item.get('template') or item.get(
-                'href') or item.get('path')
-
-            if key and template:
-                templates[key] = template
-
-    return templates
