@@ -18,6 +18,7 @@ ogr.UseExceptions()
 osr.UseExceptions()
 
 _sessions_cache = TTLCache(maxsize=640*1024, ttl=86400)
+_codelist_cache = TTLCache(maxsize=1024, ttl=86400)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -45,6 +46,51 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             or provider_def.get('links_base_url')
             or provider_def.get('base_url')
         )
+        self.configured_fields: Dict[str, Dict[str, Any]] = provider_def.get('fields', {})
+
+    def get_fields(self) -> Dict[str, Dict[str, Any]]:
+        fields = super().get_fields()
+
+        if not self.configured_fields:
+            return fields
+
+        for field_name, field_config in self.configured_fields.items():
+            if not isinstance(field_config, dict):
+                continue
+
+            target = fields.setdefault(field_name, {})
+
+            if not target and 'type' not in field_config:
+                target['type'] = 'string'
+
+            for key, value in field_config.items():
+                if value is None:
+                    continue
+
+                target[key] = deepcopy(value)
+
+            codelist_url = field_config.get('codelist')
+
+            if codelist_url and 'enum' not in target:
+                try:
+                    codelist_entries = _get_codelist_for_schema(codelist_url)
+                except Exception as err:
+                    LOGGER.warning(
+                        'Could not create enum for field "%s" from codelist %s: %s',
+                        field_name,
+                        codelist_url,
+                        err,
+                    )
+                else:
+                    if codelist_entries:
+                        target.setdefault('type', 'string')
+                        target['enum'] = [entry[0] for entry in codelist_entries]
+                        labels = [entry[1] for entry in codelist_entries]
+
+                        if any(label and label != code for code, label in codelist_entries):
+                            target['enum_titles'] = labels
+
+        return fields
 
     def query(
         self,
@@ -743,3 +789,8 @@ def _get_codelist(url: str) -> List[Tuple[str, str]]:
     codelist.sort(key=lambda entry: entry[0])
 
     return codelist
+
+
+@cached(cache=_codelist_cache)
+def _get_codelist_for_schema(url: str) -> List[Tuple[str, str]]:
+    return _get_codelist(url)
