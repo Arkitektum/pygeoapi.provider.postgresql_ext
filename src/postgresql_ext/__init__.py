@@ -214,7 +214,9 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             feature['geometry'] = None
 
         feature_id = item_dict.pop(self.id_field)
+        
         feature['id'] = feature_id
+        feature['properties'] = {}
 
         self._add_mapped_values(item_dict)
 
