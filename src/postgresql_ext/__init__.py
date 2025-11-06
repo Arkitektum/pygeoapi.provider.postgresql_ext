@@ -133,7 +133,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 response['numberReturned'] += 1
                 response['features'].append(
                     self._create_feature(
-                        item, target_crs, coord_trans, links_base)
+                        item, target_crs, coord_trans, select_properties, links_base)
                 )
 
         return response
@@ -165,7 +165,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 crs_transform_spec)
 
             feature = self._create_feature(
-                item, target_crs, coord_trans, links_base)
+                item, target_crs, coord_trans, [], links_base)
 
             crs_uri = crs_transform_spec.target_crs_uri if crs_transform_spec else self.storage_crs
             _add_geojson_crs(feature, crs_uri)
@@ -182,7 +182,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         return feature
 
-    def _create_feature(self, item: Any, target_crs: str, coord_trans: osr.CoordinateTransformation | None, links_base: Optional[str] = None) -> Dict[str, Any]:
+    def _create_feature(self, item: Any, target_crs: str, coord_trans: osr.CoordinateTransformation | None, select_properties: List[str], links_base: Optional[str] = None) -> Dict[str, Any]:
         feature: Dict[str, Any] = {
             'type': 'Feature'
         }
@@ -218,7 +218,12 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         self._add_mapped_values(item_dict)
 
-        feature['properties'] = item_dict
+        keys = select_properties or self.fields.keys()
+
+        for key in keys:
+            if key in item_dict:
+                feature['properties'][key] = item_dict[key]
+
         self._add_provider_links(feature, feature_id, links_base)
 
         return feature
@@ -380,7 +385,8 @@ def _determine_links_base_url(kwargs: Dict[str, Any], provider_base: Optional[st
     headers = kwargs.get('headers') or kwargs.get('request_headers')
 
     if isinstance(headers, dict):
-        proto = headers.get('X-Forwarded-Proto') or headers.get('Forwarded-Proto')
+        proto = headers.get(
+            'X-Forwarded-Proto') or headers.get('Forwarded-Proto')
         host = headers.get('X-Forwarded-Host') or headers.get('Host')
 
         if proto and host:
@@ -495,7 +501,8 @@ def _prepare_link(candidate: Dict[str, Any], primary_base: Optional[str], fallba
                 break
 
     if not resolved_href or not _is_absolute_href(resolved_href):
-        LOGGER.warning('Link href "%s" could not be resolved to an absolute URL.', href_value)
+        LOGGER.warning(
+            'Link href "%s" could not be resolved to an absolute URL.', href_value)
         return None
 
     prepared['href'] = resolved_href
