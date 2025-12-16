@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 from typing import Dict, List, Tuple, Any, Optional
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from osgeo import ogr, osr
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine, text, select
 from sqlalchemy.orm import Session
 from geoalchemy2 import WKBElement
 from cachetools import cached, TTLCache, keys
@@ -33,6 +33,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
     def __init__(self, provider_def: dict):
         super().__init__(provider_def)
 
+        self.has_curve_geoms: bool = provider_def.get('curve_geoms', False)
+
         field_mappings = provider_def.get('field_mappings', [])
         namespace = self._get_collection_namespace()
 
@@ -40,6 +42,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                                                           self._engine, self.db_search_path[0])
         self.link_templates = _normalize_link_config(
             provider_def.get('links'))
+
         self.links_base_url = (
             provider_def.get('links_base')
             or provider_def.get('links_base_url')
@@ -95,12 +98,21 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         links_base = _determine_links_base_url(kwargs, self.links_base_url)
 
         with Session(self._engine) as session:
-            results = (
-                session.query(self.table_model)
+            id_column = getattr(self.table_model, self.id_field)
+
+            ids_cte = (
+                select(id_column.label('id'))
                 .filter(property_filters)
                 .filter(cql_filters)
                 .filter(bbox_filter)
                 .filter(time_filter)
+                .order_by(id_column)
+                .cte('ids')
+            )
+
+            results = (
+                session.query(self.table_model)
+                .join(ids_cte, id_column == ids_cte.c.id)
                 .options(selected_properties)
             )
 
@@ -182,6 +194,12 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         return feature
 
+    def _get_geometry(self, ewkb_elem: WKBElement) -> ogr.Geometry:
+        wkb_elem = ewkb_elem.as_wkb()
+        geom: ogr.Geometry = ogr.CreateGeometryFromWkb(wkb_elem.data)
+
+        return geom if not self.has_curve_geoms else geom.GetLinearGeometry()
+
     def _create_feature(self, item: Any, target_crs: str, coord_trans: osr.CoordinateTransformation | None, select_properties: List[str], links_base: Optional[str] = None) -> Dict[str, Any]:
         feature: Dict[str, Any] = {
             'type': 'Feature'
@@ -192,29 +210,27 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         if item_dict.get(self.geom):
             ewkb_elem: WKBElement = item_dict.pop(self.geom)
-            wkb_elem = ewkb_elem.as_wkb()
-            geom: ogr.Geometry = ogr.CreateGeometryFromWkb(wkb_elem.data)
-            linear_geom: ogr.Geometry = geom.GetLinearGeometry()
+            geom = self._get_geometry(ewkb_elem)
 
             if coord_trans:
-                linear_geom.Transform(coord_trans)
+                geom.Transform(coord_trans)
 
             if target_crs == 'EPSG:4326':
-                linear_geom.SwapXY()
+                geom.SwapXY()
 
             if target_crs in ['OGC:CRS84', 'EPSG:4326']:
                 coord_precision = 'COORDINATE_PRECISION=6'
             else:
                 coord_precision = 'COORDINATE_PRECISION=2'
 
-            json_str = linear_geom.ExportToJson([coord_precision])
+            json_str = geom.ExportToJson([coord_precision])
 
             feature['geometry'] = json.loads(json_str)
         else:
             feature['geometry'] = None
 
         feature_id = item_dict.pop(self.id_field)
-        
+
         feature['id'] = feature_id
         feature['properties'] = {}
 
