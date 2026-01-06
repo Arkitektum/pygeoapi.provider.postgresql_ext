@@ -24,7 +24,7 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_CRS = 'http://www.opengis.net/def/crs/OGC/1.3/CRS84'
 
 
-class (PostgreSQLProvider):
+class PostgreSQLExtendedProvider(PostgreSQLProvider):
     """
     A provider for querying a PostgreSQL database. 
       * Supports nonlinear geometry types      
