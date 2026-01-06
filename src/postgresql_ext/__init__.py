@@ -8,11 +8,12 @@ from osgeo import ogr, osr
 from sqlalchemy import Engine, text, select
 from sqlalchemy.orm import Session
 from geoalchemy2 import WKBElement
+from geoalchemy2.functions import ST_Intersects, ST_MakeEnvelope, ST_Transform
 from cachetools import cached, TTLCache, keys
 import requests
 from pygeoapi.provider.base import ProviderItemNotFoundError
 from pygeoapi.provider.sql import PostgreSQLProvider
-from pygeoapi.util import CrsTransformSpec, get_crs_from_uri
+from pygeoapi.util import CrsTransformSpec, get_crs_from_uri, transform_bbox
 
 ogr.UseExceptions()
 osr.UseExceptions()
@@ -20,6 +21,7 @@ osr.UseExceptions()
 _sessions_cache = TTLCache(maxsize=640*1024, ttl=86400)
 
 LOGGER = logging.getLogger(__name__)
+DEFAULT_CRS = 'http://www.opengis.net/def/crs/OGC/1.3/CRS84'
 
 
 class PostgreSQLExtendedProvider(PostgreSQLProvider):
@@ -194,12 +196,6 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         return feature
 
-    def _get_geometry(self, ewkb_elem: WKBElement) -> ogr.Geometry:
-        wkb_elem = ewkb_elem.as_wkb()
-        geom: ogr.Geometry = ogr.CreateGeometryFromWkb(wkb_elem.data)
-
-        return geom if not self.has_curve_geoms else geom.GetLinearGeometry()
-
     def _create_feature(self, item: Any, target_crs: str, coord_trans: osr.CoordinateTransformation | None, select_properties: List[str], links_base: Optional[str] = None) -> Dict[str, Any]:
         feature: Dict[str, Any] = {
             'type': 'Feature'
@@ -245,6 +241,25 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         self._add_provider_links(feature, feature_id, links_base)
 
         return feature
+    
+    def _get_bbox_filter(self, bbox: List[float]):
+        if not bbox:
+            return True
+
+        bbox_crs84 = transform_bbox(bbox, self.storage_crs, DEFAULT_CRS)
+        storage_srid = get_crs_from_uri(self.storage_crs).to_epsg()
+        envelope = ST_Transform(ST_MakeEnvelope(*bbox_crs84, 4326), storage_srid)
+
+        geom_column = getattr(self.table_model, self.geom)
+        bbox_filter = ST_Intersects(envelope, geom_column)
+
+        return bbox_filter
+    
+    def _get_geometry(self, ewkb_elem: WKBElement) -> ogr.Geometry:
+        wkb_elem = ewkb_elem.as_wkb()
+        geom: ogr.Geometry = ogr.CreateGeometryFromWkb(wkb_elem.data)
+
+        return geom if not self.has_curve_geoms else geom.GetLinearGeometry()
 
     def _set_prev_and_next(self, identifier, feature: Dict, session: Session) -> None:
         identifier_str = str(identifier)
