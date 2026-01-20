@@ -215,7 +215,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 geom.SwapXY()
 
             if target_crs in ['OGC:CRS84', 'EPSG:4326']:
-                coord_precision = 'COORDINATE_PRECISION=8'
+                coord_precision = 'COORDINATE_PRECISION=10'
             else:
                 coord_precision = 'COORDINATE_PRECISION=2'
 
