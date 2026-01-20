@@ -214,12 +214,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             if target_crs == 'EPSG:4326':
                 geom.SwapXY()
 
-            if target_crs in ['OGC:CRS84', 'EPSG:4326']:
-                coord_precision = 'COORDINATE_PRECISION=10'
-            else:
-                coord_precision = 'COORDINATE_PRECISION=2'
-
-            json_str = geom.ExportToJson([coord_precision])
+            json_str = geom.ExportToJson()
 
             feature['geometry'] = json.loads(json_str)
         else:
