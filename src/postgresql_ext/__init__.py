@@ -250,7 +250,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         for key in keys:
             if key in item_dict:
-                feature['properties'][key] = item_dict[key]
+                properties[key] = item_dict[key]
 
         feature['properties'] = self._objectify_properties(properties)
         
