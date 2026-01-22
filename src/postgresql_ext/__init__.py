@@ -28,8 +28,11 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
     """
     A provider for querying a PostgreSQL database. 
       * Supports nonlinear geometry types      
-      * Supports field mappings from other tables or GML codelists
+      * Supports field mappings for richer JSON schema
       * Caches table IDs for faster creation of fields for previous and next items
+      * Improved performance when querying large tables
+      * Converts dot-concatenated fields to objects
+      * Fixes a bug related to BBOX filtering
     """
 
     def __init__(self, provider_def: dict):
@@ -241,7 +244,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         feature['id'] = feature_id
         properties = {}
 
-        self._add_mapped_values(item_dict)
+        # self._add_mapped_values(item_dict)
         keys = self._get_properties(select_properties)
 
         for key in keys:
@@ -338,18 +341,18 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         feature['prev'] = prev
         feature['next'] = next
 
-    def _add_mapped_values(self, item_dict: Dict) -> None:
-        if not self.field_mapping_data:
-            return
+    # def _add_mapped_values(self, item_dict: Dict) -> None:
+    #     if not self.field_mapping_data:
+    #         return
 
-        for key, data in self.field_mapping_data.items():
-            if not key in item_dict:
-                continue
+    #     for key, data in self.field_mapping_data.items():
+    #         if not key in item_dict:
+    #             continue
 
-            value = item_dict[key]
-            mapped_value = next(
-                (tup for tup in data if tup[0] == str(value)), None)
-            item_dict[key] = mapped_value[1] if mapped_value else value
+    #         value = item_dict[key]
+    #         mapped_value = next(
+    #             (tup for tup in data if tup[0] == str(value)), None)
+    #         item_dict[key] = mapped_value[1] if mapped_value else value
 
     def _add_provider_links(self, feature: Dict[str, Any], feature_id: Any, links_base: Optional[str]) -> None:
         if not getattr(self, 'link_templates', None):
