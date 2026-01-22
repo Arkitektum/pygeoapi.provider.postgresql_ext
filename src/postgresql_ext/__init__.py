@@ -13,7 +13,7 @@ from cachetools import cached, TTLCache, keys
 import requests
 from pygeoapi.provider.base import ProviderItemNotFoundError
 from pygeoapi.provider.sql import PostgreSQLProvider
-from pygeoapi.util import CrsTransformSpec, get_crs_from_uri, transform_bbox
+from pygeoapi.crs import CrsTransformSpec, get_crs, transform_bbox, DEFAULT_STORAGE_CRS
 
 ogr.UseExceptions()
 osr.UseExceptions()
@@ -36,6 +36,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
     """
 
     def __init__(self, provider_def: dict):
+        self.storage_crs_uri: str = provider_def.get('storage_crs', DEFAULT_STORAGE_CRS)
         self.field_mappings: Dict[str, Any] = provider_def.get('field_mappings', {})
         self.has_curve_geoms: bool = provider_def.get('curve_geoms', False)
         self.excluded_properties: List[str] = provider_def.get('exclude_properties', [])
@@ -143,7 +144,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 'type': 'FeatureCollection'
             }
 
-            crs_uri = crs_transform_spec.target_crs_uri if crs_transform_spec else self.storage_crs
+            crs_uri = crs_transform_spec.target_crs_uri if crs_transform_spec else self.storage_crs_uri
             _add_geojson_crs(response, crs_uri)
 
             response['features'] = []
@@ -154,7 +155,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 return response
 
             target_crs = _get_target_crs(
-                crs_transform_spec, self.storage_crs)
+                crs_transform_spec, self.storage_crs_uri)
 
             coord_trans = _get_coordinate_transformation(
                 crs_transform_spec)
@@ -192,7 +193,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             links_base = _determine_links_base_url(kwargs, self.links_base_url)
 
             target_crs = _get_target_crs(
-                crs_transform_spec, self.storage_crs)
+                crs_transform_spec, self.storage_crs_uri)
 
             coord_trans = _get_coordinate_transformation(
                 crs_transform_spec)
@@ -200,7 +201,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             feature = self._create_feature(
                 item, target_crs, coord_trans, [], links_base)
 
-            crs_uri = crs_transform_spec.target_crs_uri if crs_transform_spec else self.storage_crs
+            crs_uri = crs_transform_spec.target_crs_uri if crs_transform_spec else self.storage_crs_uri
             _add_geojson_crs(feature, crs_uri)
 
             if self.properties:
@@ -261,8 +262,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         if not bbox:
             return True
 
-        bbox_crs84 = transform_bbox(bbox, self.storage_crs, DEFAULT_CRS)
-        storage_srid = get_crs_from_uri(self.storage_crs).to_epsg()
+        bbox_crs84 = transform_bbox(bbox, self.storage_crs_uri, DEFAULT_CRS)
+        storage_srid = self.storage_crs.to_epsg()
         envelope = ST_Transform(ST_MakeEnvelope(
             *bbox_crs84, 4326), storage_srid)
 
@@ -394,11 +395,11 @@ def _get_coordinate_transformation(crs_transform_spec: CrsTransformSpec | None) 
 
 
 def _get_target_crs(crs_transform_spec: CrsTransformSpec | None, storage_crs: str) -> str:
-    return str(get_crs_from_uri(crs_transform_spec.target_crs_uri if crs_transform_spec else storage_crs))
+    return str(get_crs(crs_transform_spec.target_crs_uri if crs_transform_spec else storage_crs))
 
 
 def _add_geojson_crs(geojson: Dict[str, Any], crs_uri: str) -> None:
-    crs = get_crs_from_uri(crs_uri)
+    crs = get_crs(crs_uri)
 
     if crs.to_string() == 'OGC:CRS84':
         return
