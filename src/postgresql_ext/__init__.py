@@ -33,15 +33,18 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
     """
 
     def __init__(self, provider_def: dict):
-        super().__init__(provider_def)
-
+        self.field_mappings: Dict[str, Any] = provider_def.get('field_mappings', {})
         self.has_curve_geoms: bool = provider_def.get('curve_geoms', False)
+        self.excluded_properties: List[str] = provider_def.get('exclude_properties', [])
 
-        field_mappings = provider_def.get('field_mappings', [])
-        namespace = self._get_collection_namespace()
+        super().__init__(provider_def)
+                
+        # field_mappings = provider_def.get('field_mappings', [])
+        # namespace = self._get_collection_namespace()
 
-        self.field_mapping_data = _get_field_mapping_data(field_mappings, namespace,
-                                                          self._engine, self.db_search_path[0])
+        # self.field_mapping_data = _get_field_mapping_data(field_mappings, namespace,
+        #                                                   self._engine, self.db_search_path[0])
+
         self.link_templates = _normalize_link_config(
             provider_def.get('links'))
 
@@ -50,6 +53,19 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             or provider_def.get('links_base_url')
             or provider_def.get('base_url')
         )
+
+    def get_fields(self) -> Dict:
+        fields = super().get_fields()
+
+        if not self.field_mappings:
+            return fields
+        
+        for key, value in self.field_mappings.items():
+            if key in fields:
+                props: Dict = fields[key]
+                props.update(value)
+
+        return fields
 
     def query(
         self,
@@ -223,38 +239,63 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         feature_id = item_dict.pop(self.id_field)
 
         feature['id'] = feature_id
-        feature['properties'] = {}
+        properties = {}
 
         self._add_mapped_values(item_dict)
-
-        keys = select_properties or self.fields.keys()
+        keys = self._get_properties(select_properties)
 
         for key in keys:
             if key in item_dict:
                 feature['properties'][key] = item_dict[key]
 
+        feature['properties'] = self._objectify_properties(properties)
+        
         self._add_provider_links(feature, feature_id, links_base)
 
         return feature
-    
+
     def _get_bbox_filter(self, bbox: List[float]):
         if not bbox:
             return True
 
         bbox_crs84 = transform_bbox(bbox, self.storage_crs, DEFAULT_CRS)
         storage_srid = get_crs_from_uri(self.storage_crs).to_epsg()
-        envelope = ST_Transform(ST_MakeEnvelope(*bbox_crs84, 4326), storage_srid)
+        envelope = ST_Transform(ST_MakeEnvelope(
+            *bbox_crs84, 4326), storage_srid)
 
         geom_column = getattr(self.table_model, self.geom)
         bbox_filter = ST_Intersects(envelope, geom_column)
 
         return bbox_filter
-    
+
     def _get_geometry(self, ewkb_elem: WKBElement) -> ogr.Geometry:
         wkb_elem = ewkb_elem.as_wkb()
         geom: ogr.Geometry = ogr.CreateGeometryFromWkb(wkb_elem.data)
 
         return geom if not self.has_curve_geoms else geom.GetLinearGeometry()
+
+    def _get_properties(self, select_properties: List[str]) -> List[str]:
+        keys = select_properties or self.fields.keys()
+        filtered = [key for key in keys if key not in self.excluded_properties]
+
+        return filtered
+
+    def _objectify_properties(self, properties: Dict[str, Any]) -> Dict[str, Any]:
+        result = {}
+
+        for key, value in properties.items():
+            parts = key.split('.')
+            current = result
+
+            for part in parts[:-1]:
+                if part not in current or not isinstance(current[part], Dict):
+                    current[part] = {}
+
+                current = current[part]
+
+            current[parts[-1]] = value
+
+        return result
 
     def _set_prev_and_next(self, identifier, feature: Dict, session: Session) -> None:
         identifier_str = str(identifier)
