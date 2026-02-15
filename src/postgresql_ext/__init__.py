@@ -18,52 +18,55 @@ from pygeoapi.crs import CrsTransformSpec, get_crs, transform_bbox, DEFAULT_STOR
 ogr.UseExceptions()
 osr.UseExceptions()
 
-_sessions_cache = TTLCache(maxsize=640*1024, ttl=86400)
+_sessions_cache = TTLCache(maxsize=640 * 1024, ttl=86400)
 
 LOGGER = logging.getLogger(__name__)
-DEFAULT_CRS = 'http://www.opengis.net/def/crs/OGC/1.3/CRS84'
+DEFAULT_CRS = "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
 
 
 class PostgreSQLExtendedProvider(PostgreSQLProvider):
     """
-    A provider for querying a PostgreSQL database. 
-      * Supports nonlinear geometry types      
+    A provider for querying a PostgreSQL database.
+      * Supports nonlinear geometry types
       * Supports field mappings for richer JSON schema
       * Caches table IDs for faster creation of fields for previous and next items
       * Improved performance when querying large tables
-      * Converts dot-concatenated fields to objects
+      * Converts dot-concatenated fields to objects (or flattens with underscores)
       * Fixes a bug related to BBOX filtering
     """
 
     def __init__(self, provider_def: dict):
-        self.storage_crs_uri: str = provider_def.get('storage_crs', DEFAULT_STORAGE_CRS)
-        self.field_mappings: Dict[str, Any] = provider_def.get('field_mappings', {})
-        self.has_curve_geoms: bool = provider_def.get('curve_geoms', False)
-        self.excluded_properties: List[str] = provider_def.get('exclude_properties', [])
+        self.storage_crs_uri: str = provider_def.get("storage_crs", DEFAULT_STORAGE_CRS)
+        self.field_mappings: Dict[str, Any] = provider_def.get("field_mappings", {})
+        self.has_curve_geoms: bool = provider_def.get("curve_geoms", False)
+        self.excluded_properties: List[str] = provider_def.get("exclude_properties", [])
+        self.flatten_properties: bool = provider_def.get("flatten_properties", False)
 
         super().__init__(provider_def)
-                
+
         # field_mappings = provider_def.get('field_mappings', [])
         # namespace = self._get_collection_namespace()
 
         # self.field_mapping_data = _get_field_mapping_data(field_mappings, namespace,
         #                                                   self._engine, self.db_search_path[0])
 
-        self.link_templates = _normalize_link_config(
-            provider_def.get('links'))
+        self.link_templates = _normalize_link_config(provider_def.get("links"))
 
         self.links_base_url = (
-            provider_def.get('links_base')
-            or provider_def.get('links_base_url')
-            or provider_def.get('base_url')
+            provider_def.get("links_base")
+            or provider_def.get("links_base_url")
+            or provider_def.get("base_url")
         )
 
     def get_fields(self) -> Dict:
         fields = super().get_fields()
 
+        if self.flatten_properties:
+            fields = {key.replace(".", "_"): value for key, value in fields.items()}
+
         if not self.field_mappings:
             return fields
-        
+
         for key, value in self.field_mappings.items():
             if key in fields:
                 props: Dict = fields[key]
@@ -75,7 +78,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         self,
         offset=0,
         limit=10,
-        resulttype='results',
+        resulttype="results",
         bbox=[],
         datetime_=None,
         properties: List[Tuple[str, str]] = [],
@@ -85,7 +88,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         q=None,
         filterq=None,
         crs_transform_spec: Optional[CrsTransformSpec] = None,
-        **kwargs
+        **kwargs,
     ):
         """
         Query sql database for all the content.
@@ -123,13 +126,13 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             id_column = getattr(self.table_model, self.id_field)
 
             ids_cte = (
-                select(id_column.label('id'))
+                select(id_column.label("id"))
                 .filter(property_filters)
                 .filter(cql_filters)
                 .filter(bbox_filter)
                 .filter(time_filter)
                 .order_by(id_column)
-                .cte('ids')
+                .cte("ids")
             )
 
             results = (
@@ -140,39 +143,44 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
             matched = results.count()
 
-            response: Dict[str, Any] = {
-                'type': 'FeatureCollection'
-            }
+            response: Dict[str, Any] = {"type": "FeatureCollection"}
 
-            crs_uri = crs_transform_spec.target_crs_uri if crs_transform_spec else self.storage_crs_uri
+            crs_uri = (
+                crs_transform_spec.target_crs_uri
+                if crs_transform_spec
+                else self.storage_crs_uri
+            )
             _add_geojson_crs(response, crs_uri)
 
-            response['features'] = []
-            response['numberMatched'] = matched
-            response['numberReturned'] = 0
+            response["features"] = []
+            response["numberMatched"] = matched
+            response["numberReturned"] = 0
 
-            if resulttype == 'hits' or not results:
+            if resulttype == "hits" or not results:
                 return response
 
-            target_crs = _get_target_crs(
-                crs_transform_spec, self.storage_crs_uri)
+            target_crs = _get_target_crs(crs_transform_spec, self.storage_crs_uri)
 
-            coord_trans = _get_coordinate_transformation(
-                crs_transform_spec)
+            coord_trans = _get_coordinate_transformation(crs_transform_spec)
 
-            items = results.order_by(
-                *order_by_clauses).offset(offset).limit(limit)
+            items = results.order_by(*order_by_clauses).offset(offset).limit(limit)
 
             for item in items:
-                response['numberReturned'] += 1
-                response['features'].append(
+                response["numberReturned"] += 1
+                response["features"].append(
                     self._create_feature(
-                        item, target_crs, coord_trans, select_properties, links_base)
+                        item, target_crs, coord_trans, select_properties, links_base
+                    )
                 )
 
         return response
 
-    def get(self, identifier, crs_transform_spec: Optional[CrsTransformSpec] = None, **kwargs):
+    def get(
+        self,
+        identifier,
+        crs_transform_spec: Optional[CrsTransformSpec] = None,
+        **kwargs,
+    ):
         """
         Query the provider for a specific
         feature id e.g: /collections/hotosm_bdi_waterways/items/13990765
@@ -187,25 +195,28 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             item = session.get(self.table_model, identifier)
 
             if item is None:
-                msg = f'No such item: {self.id_field}={identifier}.'
+                msg = f"No such item: {self.id_field}={identifier}."
                 raise ProviderItemNotFoundError(msg)
 
             links_base = _determine_links_base_url(kwargs, self.links_base_url)
 
-            target_crs = _get_target_crs(
-                crs_transform_spec, self.storage_crs_uri)
+            target_crs = _get_target_crs(crs_transform_spec, self.storage_crs_uri)
 
-            coord_trans = _get_coordinate_transformation(
-                crs_transform_spec)
+            coord_trans = _get_coordinate_transformation(crs_transform_spec)
 
             feature = self._create_feature(
-                item, target_crs, coord_trans, [], links_base)
+                item, target_crs, coord_trans, [], links_base
+            )
 
-            crs_uri = crs_transform_spec.target_crs_uri if crs_transform_spec else self.storage_crs_uri
+            crs_uri = (
+                crs_transform_spec.target_crs_uri
+                if crs_transform_spec
+                else self.storage_crs_uri
+            )
             _add_geojson_crs(feature, crs_uri)
 
             if self.properties:
-                props: Dict = feature['properties']
+                props: Dict = feature["properties"]
                 dropping_keys = deepcopy(props).keys()
 
                 for item in dropping_keys:
@@ -216,13 +227,18 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         return feature
 
-    def _create_feature(self, item: Any, target_crs: str, coord_trans: osr.CoordinateTransformation | None, select_properties: List[str], links_base: Optional[str] = None) -> Dict[str, Any]:
-        feature: Dict[str, Any] = {
-            'type': 'Feature'
-        }
+    def _create_feature(
+        self,
+        item: Any,
+        target_crs: str,
+        coord_trans: osr.CoordinateTransformation | None,
+        select_properties: List[str],
+        links_base: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        feature: Dict[str, Any] = {"type": "Feature"}
 
         item_dict: Dict[str, Any] = item.__dict__
-        item_dict.pop('_sa_instance_state')
+        item_dict.pop("_sa_instance_state")
 
         if item_dict.get(self.geom):
             ewkb_elem: WKBElement = item_dict.pop(self.geom)
@@ -231,18 +247,18 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             if coord_trans:
                 geom.Transform(coord_trans)
 
-            if target_crs == 'EPSG:4326':
+            if target_crs == "EPSG:4326":
                 geom.SwapXY()
 
             json_str = geom.ExportToJson()
 
-            feature['geometry'] = json.loads(json_str)
+            feature["geometry"] = json.loads(json_str)
         else:
-            feature['geometry'] = None
+            feature["geometry"] = None
 
         feature_id = item_dict.pop(self.id_field)
 
-        feature['id'] = feature_id
+        feature["id"] = feature_id
         properties = {}
 
         # self._add_mapped_values(item_dict)
@@ -252,8 +268,11 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             if key in item_dict:
                 properties[key] = item_dict[key]
 
-        feature['properties'] = self._objectify_properties(properties)
-        
+        if self.flatten_properties:
+            feature["properties"] = self._flatten_properties(properties)
+        else:
+            feature["properties"] = self._objectify_properties(properties)
+
         self._add_provider_links(feature, feature_id, links_base)
 
         return feature
@@ -264,8 +283,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         bbox_crs84 = transform_bbox(bbox, self.storage_crs_uri, DEFAULT_CRS)
         storage_srid = self.storage_crs.to_epsg()
-        envelope = ST_Transform(ST_MakeEnvelope(
-            *bbox_crs84, 4326), storage_srid)
+        envelope = ST_Transform(ST_MakeEnvelope(*bbox_crs84, 4326), storage_srid)
 
         geom_column = getattr(self.table_model, self.geom)
         bbox_filter = ST_Intersects(envelope, geom_column)
@@ -284,11 +302,14 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         return filtered
 
+    def _flatten_properties(self, properties: Dict[str, Any]) -> Dict[str, Any]:
+        return {key.replace(".", "_"): value for key, value in properties.items()}
+
     def _objectify_properties(self, properties: Dict[str, Any]) -> Dict[str, Any]:
         result = {}
 
         for key, value in properties.items():
-            parts = key.split('.')
+            parts = key.split(".")
             current = result
 
             for part in parts[:-1]:
@@ -308,7 +329,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         index = _find_identifier_index(ids, identifier_str)
 
         if index is None:
-            cache = getattr(_get_table_ids, 'cache', None)
+            cache = getattr(_get_table_ids, "cache", None)
             cache_key = keys.hashkey(self.table_model)
 
             if cache is not None:
@@ -321,7 +342,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             LOGGER.warning(
                 'ID "%s" not found in cached list for %s; skipping prev/next generation.',
                 identifier,
-                getattr(self.table_model, '__tablename__', self.table_model),
+                getattr(self.table_model, "__tablename__", self.table_model),
             )
             return
 
@@ -339,8 +360,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         else:
             next = ids[index + 1]
 
-        feature['prev'] = prev
-        feature['next'] = next
+        feature["prev"] = prev
+        feature["next"] = next
 
     # def _add_mapped_values(self, item_dict: Dict) -> None:
     #     if not self.field_mapping_data:
@@ -355,20 +376,22 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
     #             (tup for tup in data if tup[0] == str(value)), None)
     #         item_dict[key] = mapped_value[1] if mapped_value else value
 
-    def _add_provider_links(self, feature: Dict[str, Any], feature_id: Any, links_base: Optional[str]) -> None:
-        if not getattr(self, 'link_templates', None):
+    def _add_provider_links(
+        self, feature: Dict[str, Any], feature_id: Any, links_base: Optional[str]
+    ) -> None:
+        if not getattr(self, "link_templates", None):
             return
 
-        format_context: Dict[str, Any] = {'id': feature_id}
+        format_context: Dict[str, Any] = {"id": feature_id}
 
-        properties = feature.get('properties', {})
+        properties = feature.get("properties", {})
 
         if isinstance(properties, dict):
             format_context.update(properties)
 
         link_candidates: List[Dict[str, Any]] = []
 
-        for template in getattr(self, 'link_templates', []):
+        for template in getattr(self, "link_templates", []):
             rendered = _render_link_template(template, format_context)
 
             if rendered:
@@ -378,10 +401,12 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             _merge_links(feature, link_candidates, links_base)
 
     def _get_collection_namespace(self) -> str:
-        return f'{self.db_name}.{self.db_search_path[0]}.{self.table}'
+        return f"{self.db_name}.{self.db_search_path[0]}.{self.table}"
 
 
-def _get_coordinate_transformation(crs_transform_spec: CrsTransformSpec | None) -> osr.CoordinateTransformation | None:
+def _get_coordinate_transformation(
+    crs_transform_spec: CrsTransformSpec | None,
+) -> osr.CoordinateTransformation | None:
     if not crs_transform_spec:
         return None
 
@@ -394,25 +419,32 @@ def _get_coordinate_transformation(crs_transform_spec: CrsTransformSpec | None) 
     return osr.CoordinateTransformation(source, target)
 
 
-def _get_target_crs(crs_transform_spec: CrsTransformSpec | None, storage_crs: str) -> str:
-    return str(get_crs(crs_transform_spec.target_crs_uri if crs_transform_spec else storage_crs))
+def _get_target_crs(
+    crs_transform_spec: CrsTransformSpec | None, storage_crs: str
+) -> str:
+    return str(
+        get_crs(
+            crs_transform_spec.target_crs_uri if crs_transform_spec else storage_crs
+        )
+    )
 
 
 def _add_geojson_crs(geojson: Dict[str, Any], crs_uri: str) -> None:
     crs = get_crs(crs_uri)
 
-    if crs.to_string() == 'OGC:CRS84':
+    if crs.to_string() == "OGC:CRS84":
         return
 
-    geojson['crs'] = {
-        'type': 'name',
-        'properties': {
-            'name': f'urn:ogc:def:crs:EPSG::{crs.to_epsg() or 4326}'
-        }
+    geojson["crs"] = {
+        "type": "name",
+        "properties": {"name": f"urn:ogc:def:crs:EPSG::{crs.to_epsg() or 4326}"},
     }
 
 
-@cached(cache=_sessions_cache, key=lambda table_model, id_field, session: keys.hashkey(table_model))
+@cached(
+    cache=_sessions_cache,
+    key=lambda table_model, id_field, session: keys.hashkey(table_model),
+)
 def _get_table_ids(table_model, id_field, session: Session) -> List[Any]:
     id_column = getattr(table_model, id_field)
     result = session.query(id_column).order_by(id_column.asc())
@@ -428,16 +460,18 @@ def _find_identifier_index(ids: List[Any], identifier: str) -> Optional[int]:
         return None
 
 
-def _determine_links_base_url(kwargs: Dict[str, Any], provider_base: Optional[str]) -> Optional[str]:
+def _determine_links_base_url(
+    kwargs: Dict[str, Any], provider_base: Optional[str]
+) -> Optional[str]:
     if not isinstance(kwargs, dict):
         kwargs = {}
 
     candidates: List[str] = []
 
-    request = kwargs.get('request')
+    request = kwargs.get("request")
 
     if request is not None:
-        for attr in ('url_root', 'host_url', 'base_url', 'url'):
+        for attr in ("url_root", "host_url", "base_url", "url"):
             value = getattr(request, attr, None)
 
             if callable(value):
@@ -449,40 +483,39 @@ def _determine_links_base_url(kwargs: Dict[str, Any], provider_base: Optional[st
             if value:
                 candidates.append(str(value))
 
-    for key in ('request_url_root', 'request_url', 'url_root', 'base_url', 'url'):
+    for key in ("request_url_root", "request_url", "url_root", "base_url", "url"):
         value = kwargs.get(key)
 
         if value:
             candidates.append(str(value))
 
-    headers = kwargs.get('headers') or kwargs.get('request_headers')
+    headers = kwargs.get("headers") or kwargs.get("request_headers")
 
     if isinstance(headers, dict):
-        proto = headers.get(
-            'X-Forwarded-Proto') or headers.get('Forwarded-Proto')
-        host = headers.get('X-Forwarded-Host') or headers.get('Host')
+        proto = headers.get("X-Forwarded-Proto") or headers.get("Forwarded-Proto")
+        host = headers.get("X-Forwarded-Host") or headers.get("Host")
 
         if proto and host:
-            candidates.append(f'{proto}://{host}/')
+            candidates.append(f"{proto}://{host}/")
 
-        forwarded = headers.get('Forwarded')
+        forwarded = headers.get("Forwarded")
 
         if isinstance(forwarded, str):
-            first_entry = forwarded.split(',', 1)[0]
+            first_entry = forwarded.split(",", 1)[0]
             parts: Dict[str, str] = {}
 
-            for element in first_entry.split(';'):
-                if '=' not in element:
+            for element in first_entry.split(";"):
+                if "=" not in element:
                     continue
 
-                key, value = element.split('=', 1)
+                key, value = element.split("=", 1)
                 parts[key.strip().lower()] = value.strip()
 
-            proto = parts.get('proto')
-            host = parts.get('host')
+            proto = parts.get("proto")
+            host = parts.get("host")
 
             if proto and host:
-                candidates.append(f'{proto}://{host}/')
+                candidates.append(f"{proto}://{host}/")
 
     if provider_base:
         candidates.append(str(provider_base))
@@ -496,16 +529,16 @@ def _determine_links_base_url(kwargs: Dict[str, Any], provider_base: Optional[st
     return None
 
 
-def _merge_links(feature: Dict[str, Any], candidates: List[Dict[str, Any]], base_href: Optional[str]) -> None:
-    links = feature.setdefault('links', [])
+def _merge_links(
+    feature: Dict[str, Any], candidates: List[Dict[str, Any]], base_href: Optional[str]
+) -> None:
+    links = feature.setdefault("links", [])
 
     if not isinstance(links, list):
         return
 
     existing_links = {
-        (link.get('rel'), link.get('href'))
-        for link in links
-        if isinstance(link, dict)
+        (link.get("rel"), link.get("href")) for link in links if isinstance(link, dict)
     }
 
     normalized_base = _normalize_base_href(base_href)
@@ -518,7 +551,7 @@ def _merge_links(feature: Dict[str, Any], candidates: List[Dict[str, Any]], base
         if not prepared:
             continue
 
-        key = (prepared.get('rel'), prepared.get('href'))
+        key = (prepared.get("rel"), prepared.get("href"))
 
         if key in existing_links:
             continue
@@ -528,15 +561,15 @@ def _merge_links(feature: Dict[str, Any], candidates: List[Dict[str, Any]], base
 
 
 def _get_link_base_href(links: List[Dict[str, Any]]) -> Optional[str]:
-    for rel_name in ('self', 'collection'):
+    for rel_name in ("self", "collection"):
         for link in links:
             if not isinstance(link, dict):
                 continue
 
-            if link.get('rel') != rel_name:
+            if link.get("rel") != rel_name:
                 continue
 
-            href = link.get('href')
+            href = link.get("href")
 
             base = _derive_base_href(href)
 
@@ -546,11 +579,13 @@ def _get_link_base_href(links: List[Dict[str, Any]]) -> Optional[str]:
     return None
 
 
-def _prepare_link(candidate: Dict[str, Any], primary_base: Optional[str], fallback_base: Optional[str]) -> Optional[Dict[str, Any]]:
+def _prepare_link(
+    candidate: Dict[str, Any], primary_base: Optional[str], fallback_base: Optional[str]
+) -> Optional[Dict[str, Any]]:
     if not isinstance(candidate, dict):
         return None
 
-    href_value = candidate.get('href')
+    href_value = candidate.get("href")
 
     if not href_value:
         return None
@@ -575,19 +610,20 @@ def _prepare_link(candidate: Dict[str, Any], primary_base: Optional[str], fallba
 
     if not resolved_href or not _is_absolute_href(resolved_href):
         LOGGER.warning(
-            'Link href "%s" could not be resolved to an absolute URL.', href_value)
+            'Link href "%s" could not be resolved to an absolute URL.', href_value
+        )
         return None
 
-    prepared['href'] = resolved_href
-    prepared['rel'] = prepared.get('rel') or 'related'
-    prepared.setdefault('type', 'application/json')
+    prepared["href"] = resolved_href
+    prepared["rel"] = prepared.get("rel") or "related"
+    prepared.setdefault("type", "application/json")
 
     return prepared
 
 
 def _resolve_link_href(target: str, base_href: Optional[str]) -> str:
     if not target:
-        return ''
+        return ""
 
     target_parts = urlsplit(target)
 
@@ -597,18 +633,18 @@ def _resolve_link_href(target: str, base_href: Optional[str]) -> str:
     if base_href:
         base_parts = urlsplit(base_href)
 
-        if target_parts.path.startswith('/'):
-            combined_path = (
-                base_parts.path.rstrip('/') + target_parts.path
-            ) or '/'
+        if target_parts.path.startswith("/"):
+            combined_path = (base_parts.path.rstrip("/") + target_parts.path) or "/"
 
-            return urlunsplit((
-                base_parts.scheme,
-                base_parts.netloc,
-                combined_path,
-                target_parts.query,
-                target_parts.fragment
-            ))
+            return urlunsplit(
+                (
+                    base_parts.scheme,
+                    base_parts.netloc,
+                    combined_path,
+                    target_parts.query,
+                    target_parts.fragment,
+                )
+            )
 
         joined = urljoin(base_href, target)
 
@@ -639,24 +675,24 @@ def _derive_base_href(url: Optional[str]) -> Optional[str]:
     if not parts.scheme or not parts.netloc:
         return None
 
-    marker = '/collections/'
-    path = parts.path or '/'
+    marker = "/collections/"
+    path = parts.path or "/"
 
     if marker in path:
-        path = path[:path.index(marker)]
+        path = path[: path.index(marker)]
 
     if not path:
-        path = '/'
+        path = "/"
 
-    path = path.rstrip('/')
+    path = path.rstrip("/")
 
     if not path:
-        path = '/'
+        path = "/"
 
-    if not path.endswith('/'):
-        path = f'{path}/'
+    if not path.endswith("/"):
+        path = f"{path}/"
 
-    return urlunsplit((parts.scheme, parts.netloc, path, '', ''))
+    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 
 def _is_absolute_href(href: Optional[str]) -> bool:
@@ -668,7 +704,9 @@ def _is_absolute_href(href: Optional[str]) -> bool:
     return bool(parts.scheme and parts.netloc)
 
 
-def _render_link_template(template: Dict[str, Any], context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _render_link_template(
+    template: Dict[str, Any], context: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
     if not isinstance(template, dict):
         return None
 
@@ -680,24 +718,20 @@ def _render_link_template(template: Dict[str, Any], context: Dict[str, Any]) -> 
         except KeyError as err:
             missing = err.args[0]
             LOGGER.warning(
-                'Link template field "%s" is missing property "%s".',
-                key,
-                missing
+                'Link template field "%s" is missing property "%s".', key, missing
             )
             return None
         except Exception as err:
             LOGGER.warning(
-                'Link template field "%s" could not be resolved: %s',
-                key,
-                err
+                'Link template field "%s" could not be resolved: %s', key, err
             )
             return None
 
-    if 'href' not in rendered:
+    if "href" not in rendered:
         return None
 
-    rendered.setdefault('rel', 'related')
-    rendered.setdefault('type', 'application/json')
+    rendered.setdefault("rel", "related")
+    rendered.setdefault("type", "application/json")
 
     return rendered
 
@@ -741,55 +775,72 @@ def _normalize_link_config(link_definition: Any) -> List[Dict[str, Any]]:
     return templates
 
 
-@cached(cache=_sessions_cache, key=lambda field_mappings, namespace, engine, db_search_path: keys.hashkey(namespace))
-def _get_field_mapping_data(field_mappings: Dict[str, Dict[str, str]], namespace: str, engine: Engine, db_search_path: str) -> Dict[str, List[Tuple]]:
+@cached(
+    cache=_sessions_cache,
+    key=lambda field_mappings, namespace, engine, db_search_path: keys.hashkey(
+        namespace
+    ),
+)
+def _get_field_mapping_data(
+    field_mappings: Dict[str, Dict[str, str]],
+    namespace: str,
+    engine: Engine,
+    db_search_path: str,
+) -> Dict[str, List[Tuple]]:
     mapping_data: Dict[str, List[Tuple]] = {}
 
     if not field_mappings:
         return mapping_data
 
     codelist_mappings = [
-        item for item in field_mappings.items() if 'codelist' in item[1]]
+        item for item in field_mappings.items() if "codelist" in item[1]
+    ]
 
     if codelist_mappings:
         codelist_mapping_data = _create_field_mapping_data_from_codelists(
-            codelist_mappings)
+            codelist_mappings
+        )
         mapping_data.update(codelist_mapping_data)
 
-    table_mappings = [item for item in field_mappings.items()
-                      if 'table' in item[1]]
+    table_mappings = [item for item in field_mappings.items() if "table" in item[1]]
 
     if table_mappings:
         table_mapping_data = _create_field_mapping_data_from_tables(
-            engine, db_search_path, table_mappings)
+            engine, db_search_path, table_mappings
+        )
         mapping_data.update(table_mapping_data)
 
     return mapping_data
 
 
-def _create_field_mapping_data_from_tables(engine: Engine, db_search_path: str, table_mappings: List[Tuple[str, Dict]]) -> Dict[str, List[Tuple]]:
+def _create_field_mapping_data_from_tables(
+    engine: Engine, db_search_path: str, table_mappings: List[Tuple[str, Dict]]
+) -> Dict[str, List[Tuple]]:
     mapping_data: Dict[str, List[Tuple]] = {}
 
     with engine.connect() as connection:
         for key, value in table_mappings:
             try:
-                sql = f'SELECT {value.get('id_field')}, {value.get('value_field')} FROM {db_search_path}.{value.get('table')}'
+                sql = f"SELECT {value.get('id_field')}, {value.get('value_field')} FROM {db_search_path}.{value.get('table')}"
                 result = connection.execute(text(sql))
                 rows = result.fetchall()
                 values = [tuple(row) for row in rows]
                 mapping_data[key] = values
             except Exception as err:
                 LOGGER.warning(
-                    f'Could not create mapping data from table {value.get('table')}: {err}')
+                    f"Could not create mapping data from table {value.get('table')}: {err}"
+                )
 
     return mapping_data
 
 
-def _create_field_mapping_data_from_codelists(codelist_mappings: List[Tuple[str, Dict[str, str]]]) -> Dict[str, List[Tuple]]:
+def _create_field_mapping_data_from_codelists(
+    codelist_mappings: List[Tuple[str, Dict[str, str]]],
+) -> Dict[str, List[Tuple]]:
     mapping_data: Dict[str, List[Tuple]] = {}
 
     for key, value in codelist_mappings:
-        url = value.get('codelist')
+        url = value.get("codelist")
 
         if not url:
             continue
@@ -797,8 +848,7 @@ def _create_field_mapping_data_from_codelists(codelist_mappings: List[Tuple[str,
         try:
             mapping_data[key] = _get_codelist(url)
         except Exception as err:
-            LOGGER.warning(
-                f'Could not create mapping data from codelist {url}: {err}')
+            LOGGER.warning(f"Could not create mapping data from codelist {url}: {err}")
 
     return mapping_data
 
@@ -808,12 +858,12 @@ def _get_codelist(url: str) -> List[Tuple[str, str]]:
     response.raise_for_status()
 
     root = ET.fromstring(response.text)
-    ns = {'gml': 'http://www.opengis.net/gml/3.2'}
+    ns = {"gml": "http://www.opengis.net/gml/3.2"}
     codelist: List[Tuple[str, str]] = []
 
-    for definition in root.findall('gml:dictionaryEntry/gml:Definition', ns):
-        id = definition.findtext('gml:identifier', namespaces=ns)
-        name = definition.findtext('gml:name', namespaces=ns)
+    for definition in root.findall("gml:dictionaryEntry/gml:Definition", ns):
+        id = definition.findtext("gml:identifier", namespaces=ns)
+        name = definition.findtext("gml:name", namespaces=ns)
 
         if not id or not name:
             continue
