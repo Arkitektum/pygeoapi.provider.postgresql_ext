@@ -63,6 +63,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         if self.flatten_properties:
             fields = {key.replace(".", "_"): value for key, value in fields.items()}
+            self._fields = fields
 
         if not self.field_mappings:
             return fields
