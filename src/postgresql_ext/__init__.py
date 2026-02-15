@@ -63,7 +63,25 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         if self.flatten_properties:
             return {key.split(".")[-1]: value for key, value in self._fields.items()}
 
-        return self._fields
+        result: Dict = {}
+
+        for key, value in self._fields.items():
+            parts = key.split(".")
+
+            if len(parts) == 1:
+                result[key] = value
+                continue
+
+            current = result
+
+            for part in parts[:-1]:
+                if part not in current:
+                    current[part] = {"type": "object", "properties": {}}
+                current = current[part]["properties"]
+
+            current[parts[-1]] = value
+
+        return result
 
     def get_fields(self) -> Dict:
         fields = super().get_fields()
