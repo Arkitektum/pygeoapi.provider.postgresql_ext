@@ -58,12 +58,15 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             or provider_def.get("base_url")
         )
 
+    @property
+    def fields(self) -> Dict:
+        if self.flatten_properties:
+            return {key.split(".")[-1]: value for key, value in self._fields.items()}
+
+        return self._fields
+
     def get_fields(self) -> Dict:
         fields = super().get_fields()
-
-        if self.flatten_properties:
-            fields = {key.replace(".", "_"): value for key, value in fields.items()}
-            self._fields = fields
 
         if not self.field_mappings:
             return fields
@@ -298,13 +301,13 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         return geom if not self.has_curve_geoms else geom.GetLinearGeometry()
 
     def _get_properties(self, select_properties: List[str]) -> List[str]:
-        keys = select_properties or self.fields.keys()
+        keys = select_properties or self._fields.keys()
         filtered = [key for key in keys if key not in self.excluded_properties]
 
         return filtered
 
     def _flatten_properties(self, properties: Dict[str, Any]) -> Dict[str, Any]:
-        return {key.replace(".", "_"): value for key, value in properties.items()}
+        return {key.split(".")[-1]: value for key, value in properties.items()}
 
     def _objectify_properties(self, properties: Dict[str, Any]) -> Dict[str, Any]:
         result = {}
