@@ -6,7 +6,7 @@ from typing import Dict, List, Tuple, Any, Optional
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from osgeo import ogr, osr
 from sqlalchemy import Engine, text, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 from geoalchemy2 import WKBElement
 from geoalchemy2.functions import ST_Intersects, ST_MakeEnvelope, ST_Transform
 from cachetools import cached, TTLCache, keys
@@ -305,6 +305,26 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         filtered = [key for key in keys if key not in self.excluded_properties]
 
         return filtered
+
+    def _select_properties_clause(self, select_properties, skip_geometry=False):
+        column_names = list(select_properties or self._fields.keys())
+
+        if self.properties:
+            column_names = self.properties
+
+        if not skip_geometry:
+            column_names = list(column_names)
+            column_names.append(self.geom)
+
+        selected_columns = []
+
+        for name in column_names:
+            try:
+                selected_columns.append(getattr(self.table_model, name))
+            except AttributeError:
+                pass
+
+        return load_only(*selected_columns)
 
     def _flatten_properties(self, properties: Dict[str, Any]) -> Dict[str, Any]:
         return {key.split(".")[-1]: value for key, value in properties.items()}
