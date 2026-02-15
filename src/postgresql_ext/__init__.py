@@ -79,7 +79,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                     current[part] = {"type": "object", "properties": {}}
                 current = current[part]["properties"]
 
-            current[parts[-1]] = value
+            current[parts[-1]] = {k: v for k, v in value.items() if v is not None}
 
         return result
 
