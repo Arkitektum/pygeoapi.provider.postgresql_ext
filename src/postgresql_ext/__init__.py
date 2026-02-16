@@ -115,6 +115,12 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         :returns: GeoJSON FeatureCollection
         """
 
+        if self.flatten_properties and properties:
+            properties = [
+                (self._unflatten_property_name(name), value)
+                for name, value in properties
+            ]
+
         property_filters: Any = self._get_property_filters(properties)
         cql_filters: Any = self._get_cql_filters(filterq)
         bbox_filter: Any = self._get_bbox_filter(bbox)
@@ -325,6 +331,17 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 pass
 
         return load_only(*selected_columns)
+
+    def _unflatten_property_name(self, name: str) -> str:
+        """Map a flattened property name back to its dot-notated column name."""
+        if name in self._fields:
+            return name
+
+        for key in self._fields:
+            if key.split(".")[-1] == name:
+                return key
+
+        return name
 
     def _flatten_properties(self, properties: Dict[str, Any]) -> Dict[str, Any]:
         return {key.split(".")[-1]: value for key, value in properties.items()}
