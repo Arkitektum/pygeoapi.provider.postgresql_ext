@@ -307,16 +307,42 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         return geom if not self.has_curve_geoms else geom.GetLinearGeometry()
 
     def _get_properties(self, select_properties: List[str]) -> List[str]:
-        keys = select_properties or self._fields.keys()
+        keys = self._expand_property_prefixes(select_properties) or self._fields.keys()
         filtered = [key for key in keys if key not in self.excluded_properties]
 
         return filtered
+
+    def _expand_property_prefixes(self, names: List[str]) -> List[str]:
+        """Expand parent prefixes to their dot-notated child columns.
+
+        E.g. ["arealplanId"] -> ["arealplanId.kommunenummer", "arealplanId.planidentifikasjon", ...]
+        """
+        if not names:
+            return names
+
+        expanded: List[str] = []
+
+        for name in names:
+            if name in self._fields:
+                expanded.append(name)
+                continue
+
+            children = [key for key in self._fields if key.startswith(f"{name}.")]
+
+            if children:
+                expanded.extend(children)
+            else:
+                expanded.append(name)
+
+        return expanded
 
     def _select_properties_clause(self, select_properties, skip_geometry=False):
         column_names = list(select_properties or self._fields.keys())
 
         if self.properties:
             column_names = self.properties
+
+        column_names = self._expand_property_prefixes(column_names)
 
         if not skip_geometry:
             column_names = list(column_names)
@@ -329,6 +355,9 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 selected_columns.append(getattr(self.table_model, name))
             except AttributeError:
                 pass
+
+        if not selected_columns:
+            return load_only(getattr(self.table_model, self.id_field))
 
         return load_only(*selected_columns)
 
