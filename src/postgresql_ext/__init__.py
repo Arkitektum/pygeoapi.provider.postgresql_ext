@@ -36,11 +36,15 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
     """
 
     def __init__(self, provider_def: dict):
-        self.storage_crs_uri: str = provider_def.get("storage_crs", DEFAULT_STORAGE_CRS)
-        self.field_mappings: Dict[str, Any] = provider_def.get("field_mappings", {})
+        self.storage_crs_uri: str = provider_def.get(
+            "storage_crs", DEFAULT_STORAGE_CRS)
+        self.field_mappings: Dict[str, Any] = provider_def.get(
+            "field_mappings", {})
         self.has_curve_geoms: bool = provider_def.get("curve_geoms", False)
-        self.excluded_properties: List[str] = provider_def.get("exclude_properties", [])
-        self.flatten_properties: bool = provider_def.get("flatten_properties", False)
+        self.excluded_properties: List[str] = provider_def.get(
+            "exclude_properties", [])
+        self.flatten_properties: bool = provider_def.get(
+            "flatten_properties", False)
 
         super().__init__(provider_def)
 
@@ -133,24 +137,36 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         links_base = _determine_links_base_url(kwargs, self.links_base_url)
 
         with Session(self._engine) as session:
-            id_column = getattr(self.table_model, self.id_field)
+            has_filters = self._has_filters(property_filters, cql_filters, bbox_filter, time_filter)
 
-            ids_cte = (
-                select(id_column.label("id"))
-                .filter(property_filters)
-                .filter(cql_filters)
-                .filter(bbox_filter)
-                .filter(time_filter)
-                .order_by(id_column)
-                .cte("ids")
-            )
+            if has_filters:
+                id_column = getattr(self.table_model, self.id_field)
 
-            results = (
-                session.query(self.table_model)
-                .join(ids_cte, id_column == ids_cte.c.id)
-                .options(selected_properties)
-            )
+                ids_cte = (
+                    select(id_column.label("id"))
+                    .filter(property_filters)
+                    .filter(cql_filters)
+                    .filter(bbox_filter)
+                    .filter(time_filter)
+                    .order_by(id_column)
+                    .cte("ids")
+                )
 
+                results = (
+                    session.query(self.table_model)
+                    .join(ids_cte, id_column == ids_cte.c.id)
+                    .options(selected_properties)
+                )
+            else: 
+                results = (
+                    session.query(self.table_model)
+                    .filter(property_filters)
+                    .filter(cql_filters)
+                    .filter(bbox_filter)
+                    .filter(time_filter)
+                    .options(selected_properties)
+                )
+                
             matched = results.count()
 
             response: Dict[str, Any] = {"type": "FeatureCollection"}
@@ -160,6 +176,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 if crs_transform_spec
                 else self.storage_crs_uri
             )
+
             _add_geojson_crs(response, crs_uri)
 
             response["features"] = []
@@ -169,11 +186,13 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             if resulttype == "hits" or not results:
                 return response
 
-            target_crs = _get_target_crs(crs_transform_spec, self.storage_crs_uri)
+            target_crs = _get_target_crs(
+                crs_transform_spec, self.storage_crs_uri)
 
             coord_trans = _get_coordinate_transformation(crs_transform_spec)
 
-            items = results.order_by(*order_by_clauses).offset(offset).limit(limit)
+            items = results.order_by(
+                *order_by_clauses).offset(offset).limit(limit)
 
             for item in items:
                 response["numberReturned"] += 1
@@ -210,7 +229,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
             links_base = _determine_links_base_url(kwargs, self.links_base_url)
 
-            target_crs = _get_target_crs(crs_transform_spec, self.storage_crs_uri)
+            target_crs = _get_target_crs(
+                crs_transform_spec, self.storage_crs_uri)
 
             coord_trans = _get_coordinate_transformation(crs_transform_spec)
 
@@ -293,7 +313,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         bbox_crs84 = transform_bbox(bbox, self.storage_crs_uri, DEFAULT_CRS)
         storage_srid = self.storage_crs.to_epsg()
-        envelope = ST_Transform(ST_MakeEnvelope(*bbox_crs84, 4326), storage_srid)
+        envelope = ST_Transform(ST_MakeEnvelope(
+            *bbox_crs84, 4326), storage_srid)
 
         geom_column = getattr(self.table_model, self.geom)
         bbox_filter = ST_Intersects(envelope, geom_column)
@@ -307,10 +328,19 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         return geom if not self.has_curve_geoms else geom.GetLinearGeometry()
 
     def _get_properties(self, select_properties: List[str]) -> List[str]:
-        keys = self._expand_property_prefixes(select_properties) or self._fields.keys()
+        keys = self._expand_property_prefixes(
+            select_properties) or self._fields.keys()
         filtered = [key for key in keys if key not in self.excluded_properties]
 
         return filtered
+
+    def _has_filters(self, property_filters: Any, cql_filters: Any, bbox_filter: Any, time_filter: Any) -> bool:
+        return not (
+            isinstance(property_filters, bool)
+            and isinstance(cql_filters, bool)
+            and isinstance(bbox_filter, bool)
+            and isinstance(time_filter, bool)
+        )
 
     def _expand_property_prefixes(self, names: List[str]) -> List[str]:
         """Expand parent prefixes to their dot-notated child columns.
@@ -327,7 +357,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 expanded.append(name)
                 continue
 
-            children = [key for key in self._fields if key.startswith(f"{name}.")]
+            children = [
+                key for key in self._fields if key.startswith(f"{name}.")]
 
             if children:
                 expanded.extend(children)
@@ -562,7 +593,8 @@ def _determine_links_base_url(
     headers = kwargs.get("headers") or kwargs.get("request_headers")
 
     if isinstance(headers, dict):
-        proto = headers.get("X-Forwarded-Proto") or headers.get("Forwarded-Proto")
+        proto = headers.get(
+            "X-Forwarded-Proto") or headers.get("Forwarded-Proto")
         host = headers.get("X-Forwarded-Host") or headers.get("Host")
 
         if proto and host:
@@ -704,7 +736,8 @@ def _resolve_link_href(target: str, base_href: Optional[str]) -> str:
         base_parts = urlsplit(base_href)
 
         if target_parts.path.startswith("/"):
-            combined_path = (base_parts.path.rstrip("/") + target_parts.path) or "/"
+            combined_path = (base_parts.path.rstrip(
+                "/") + target_parts.path) or "/"
 
             return urlunsplit(
                 (
@@ -872,7 +905,8 @@ def _get_field_mapping_data(
         )
         mapping_data.update(codelist_mapping_data)
 
-    table_mappings = [item for item in field_mappings.items() if "table" in item[1]]
+    table_mappings = [item for item in field_mappings.items()
+                      if "table" in item[1]]
 
     if table_mappings:
         table_mapping_data = _create_field_mapping_data_from_tables(
@@ -918,7 +952,8 @@ def _create_field_mapping_data_from_codelists(
         try:
             mapping_data[key] = _get_codelist(url)
         except Exception as err:
-            LOGGER.warning(f"Could not create mapping data from codelist {url}: {err}")
+            LOGGER.warning(
+                f"Could not create mapping data from codelist {url}: {err}")
 
     return mapping_data
 
