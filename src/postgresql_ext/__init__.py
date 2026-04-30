@@ -2,7 +2,7 @@ import json
 from copy import deepcopy
 import logging
 import xml.etree.ElementTree as ET
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Dict, List, Tuple, Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from osgeo import ogr, osr
 from sqlalchemy import Engine, text, select
@@ -95,7 +95,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         skip_geometry=False,
         q=None,
         filterq=None,
-        crs_transform_spec: Optional[CrsTransformSpec] = None,
+        crs_transform_spec: CrsTransformSpec | None = None,
         **kwargs,
     ):
         """
@@ -118,7 +118,6 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         :returns: GeoJSON FeatureCollection
         """
-
         if self.flatten_properties and properties:
             properties = [
                 (self._unflatten_property_name(name), value)
@@ -137,9 +136,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         links_base = _determine_links_base_url(kwargs, self.links_base_url)
 
         with Session(self._engine) as session:
-            has_filters = self._has_filters(property_filters, cql_filters, bbox_filter, time_filter)
-
-            if has_filters:
+            if resulttype != "hits":
                 id_column = getattr(self.table_model, self.id_field)
 
                 ids_cte = (
@@ -149,6 +146,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                     .filter(bbox_filter)
                     .filter(time_filter)
                     .order_by(id_column)
+                    .offset(offset)
+                    .limit(limit)
                     .cte("ids")
                 )
 
@@ -157,7 +156,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                     .join(ids_cte, id_column == ids_cte.c.id)
                     .options(selected_properties)
                 )
-            else: 
+            else:
                 results = (
                     session.query(self.table_model)
                     .filter(property_filters)
@@ -166,21 +165,11 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                     .filter(time_filter)
                     .options(selected_properties)
                 )
-                
-            matched = results.count()
 
             response: Dict[str, Any] = {"type": "FeatureCollection"}
 
-            crs_uri = (
-                crs_transform_spec.target_crs_uri
-                if crs_transform_spec
-                else self.storage_crs_uri
-            )
-
-            _add_geojson_crs(response, crs_uri)
-
             response["features"] = []
-            response["numberMatched"] = matched
+            response["numberMatched"] = results.count()
             response["numberReturned"] = 0
 
             if resulttype == "hits" or not results:
@@ -190,9 +179,16 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 crs_transform_spec, self.storage_crs_uri)
 
             coord_trans = _get_coordinate_transformation(crs_transform_spec)
+            
+            crs_uri = (
+                crs_transform_spec.target_crs_uri
+                if crs_transform_spec
+                else self.storage_crs_uri
+            )
 
-            items = results.order_by(
-                *order_by_clauses).offset(offset).limit(limit)
+            _add_geojson_crs(response, crs_uri)
+
+            items = results.order_by(*order_by_clauses)
 
             for item in items:
                 response["numberReturned"] += 1
@@ -207,7 +203,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
     def get(
         self,
         identifier,
-        crs_transform_spec: Optional[CrsTransformSpec] = None,
+        crs_transform_spec: CrsTransformSpec | None = None,
         **kwargs,
     ):
         """
@@ -263,7 +259,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         target_crs: str,
         coord_trans: osr.CoordinateTransformation | None,
         select_properties: List[str],
-        links_base: Optional[str] = None,
+        links_base: str | None = None,
     ) -> Dict[str, Any]:
         feature: Dict[str, Any] = {"type": "Feature"}
 
@@ -333,14 +329,6 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         filtered = [key for key in keys if key not in self.excluded_properties]
 
         return filtered
-
-    def _has_filters(self, property_filters: Any, cql_filters: Any, bbox_filter: Any, time_filter: Any) -> bool:
-        return not (
-            isinstance(property_filters, bool)
-            and isinstance(cql_filters, bool)
-            and isinstance(bbox_filter, bool)
-            and isinstance(time_filter, bool)
-        )
 
     def _expand_property_prefixes(self, names: List[str]) -> List[str]:
         """Expand parent prefixes to their dot-notated child columns.
@@ -478,7 +466,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
     #         item_dict[key] = mapped_value[1] if mapped_value else value
 
     def _add_provider_links(
-        self, feature: Dict[str, Any], feature_id: Any, links_base: Optional[str]
+        self, feature: Dict[str, Any], feature_id: Any, links_base: str | None
     ) -> None:
         if not getattr(self, "link_templates", None):
             return
@@ -554,7 +542,7 @@ def _get_table_ids(table_model, id_field, session: Session) -> List[Any]:
     return ids
 
 
-def _find_identifier_index(ids: List[Any], identifier: str) -> Optional[int]:
+def _find_identifier_index(ids: List[Any], identifier: str) -> int | None:
     try:
         return ids.index(identifier)
     except ValueError:
@@ -562,8 +550,8 @@ def _find_identifier_index(ids: List[Any], identifier: str) -> Optional[int]:
 
 
 def _determine_links_base_url(
-    kwargs: Dict[str, Any], provider_base: Optional[str]
-) -> Optional[str]:
+    kwargs: Dict[str, Any], provider_base: str | None
+) -> str | None:
     if not isinstance(kwargs, dict):
         kwargs = {}
 
@@ -632,7 +620,7 @@ def _determine_links_base_url(
 
 
 def _merge_links(
-    feature: Dict[str, Any], candidates: List[Dict[str, Any]], base_href: Optional[str]
+    feature: Dict[str, Any], candidates: List[Dict[str, Any]], base_href: str | None
 ) -> None:
     links = feature.setdefault("links", [])
 
@@ -662,7 +650,7 @@ def _merge_links(
         existing_links.add(key)
 
 
-def _get_link_base_href(links: List[Dict[str, Any]]) -> Optional[str]:
+def _get_link_base_href(links: List[Dict[str, Any]]) -> str | None:
     for rel_name in ("self", "collection"):
         for link in links:
             if not isinstance(link, dict):
@@ -682,8 +670,8 @@ def _get_link_base_href(links: List[Dict[str, Any]]) -> Optional[str]:
 
 
 def _prepare_link(
-    candidate: Dict[str, Any], primary_base: Optional[str], fallback_base: Optional[str]
-) -> Optional[Dict[str, Any]]:
+    candidate: Dict[str, Any], primary_base: str | None, fallback_base: str | None
+) -> Dict[str, Any] | None:
     if not isinstance(candidate, dict):
         return None
 
@@ -723,7 +711,7 @@ def _prepare_link(
     return prepared
 
 
-def _resolve_link_href(target: str, base_href: Optional[str]) -> str:
+def _resolve_link_href(target: str, base_href: str | None) -> str:
     if not target:
         return ""
 
@@ -757,7 +745,7 @@ def _resolve_link_href(target: str, base_href: Optional[str]) -> str:
     return target
 
 
-def _normalize_base_href(base_href: Optional[str]) -> Optional[str]:
+def _normalize_base_href(base_href: str | None) -> str | None:
     if not base_href:
         return None
 
@@ -769,7 +757,7 @@ def _normalize_base_href(base_href: Optional[str]) -> Optional[str]:
     return base
 
 
-def _derive_base_href(url: Optional[str]) -> Optional[str]:
+def _derive_base_href(url: str | None) -> str | None:
     if not url:
         return None
 
@@ -798,7 +786,7 @@ def _derive_base_href(url: Optional[str]) -> Optional[str]:
     return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 
-def _is_absolute_href(href: Optional[str]) -> bool:
+def _is_absolute_href(href: str | None) -> bool:
     if not href:
         return False
 
@@ -809,7 +797,7 @@ def _is_absolute_href(href: Optional[str]) -> bool:
 
 def _render_link_template(
     template: Dict[str, Any], context: Dict[str, Any]
-) -> Optional[Dict[str, Any]]:
+) -> Dict[str, Any] | None:
     if not isinstance(template, dict):
         return None
 
