@@ -2,7 +2,7 @@ import json
 from copy import deepcopy
 import logging
 import xml.etree.ElementTree as ET
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Dict, List, Tuple, Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from osgeo import ogr, osr
 from sqlalchemy import Engine, text, select
@@ -45,8 +45,10 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
     """
 
     def __init__(self, provider_def: dict):
-        self.storage_crs_uri: str = provider_def.get("storage_crs", DEFAULT_STORAGE_CRS)
-        self.field_mappings: Dict[str, Any] = provider_def.get("field_mappings", {})
+        self.storage_crs_uri: str = provider_def.get(
+            "storage_crs", DEFAULT_STORAGE_CRS)
+        self.field_mappings: Dict[str, Any] = provider_def.get(
+            "field_mappings", {})
         self.has_curve_geoms: bool = provider_def.get("curve_geoms", False)
         self.excluded_properties: List[str] = provider_def.get("exclude_properties", [])
 
@@ -124,7 +126,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         skip_geometry=False,
         q=None,
         filterq=None,
-        crs_transform_spec: Optional[CrsTransformSpec] = None,
+        crs_transform_spec: CrsTransformSpec | None = None,
         **kwargs,
     ):
         """
@@ -147,6 +149,11 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         :returns: GeoJSON FeatureCollection
         """
+        if self.flatten_properties and properties:
+            properties = [
+                (self._unflatten_property_name(name), value)
+                for name, value in properties
+            ]
 
         if self.property_shape == PROPERTY_SHAPE_FLAT_LEAF and properties:
             properties = [
@@ -166,47 +173,59 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         links_base = _determine_links_base_url(kwargs, self.links_base_url)
 
         with Session(self._engine) as session:
-            id_column = getattr(self.table_model, self.id_field)
+            if resulttype != "hits":
+                id_column = getattr(self.table_model, self.id_field)
 
-            ids_cte = (
-                select(id_column.label("id"))
-                .filter(property_filters)
-                .filter(cql_filters)
-                .filter(bbox_filter)
-                .filter(time_filter)
-                .order_by(id_column)
-                .cte("ids")
-            )
+                ids_cte = (
+                    select(id_column.label("id"))
+                    .filter(property_filters)
+                    .filter(cql_filters)
+                    .filter(bbox_filter)
+                    .filter(time_filter)
+                    .order_by(id_column)
+                    .offset(offset)
+                    .limit(limit)
+                    .cte("ids")
+                )
 
-            results = (
-                session.query(self.table_model)
-                .join(ids_cte, id_column == ids_cte.c.id)
-                .options(selected_properties)
-            )
-
-            matched = results.count()
+                results = (
+                    session.query(self.table_model)
+                    .join(ids_cte, id_column == ids_cte.c.id)
+                    .options(selected_properties)
+                )
+            else:
+                results = (
+                    session.query(self.table_model)
+                    .filter(property_filters)
+                    .filter(cql_filters)
+                    .filter(bbox_filter)
+                    .filter(time_filter)
+                    .options(selected_properties)
+                )
 
             response: Dict[str, Any] = {"type": "FeatureCollection"}
 
-            crs_uri = (
-                crs_transform_spec.target_crs_uri
-                if crs_transform_spec
-                else self.storage_crs_uri
-            )
-            _add_geojson_crs(response, crs_uri)
-
             response["features"] = []
-            response["numberMatched"] = matched
+            response["numberMatched"] = results.count()
             response["numberReturned"] = 0
 
             if resulttype == "hits" or not results:
                 return response
 
-            target_crs = _get_target_crs(crs_transform_spec, self.storage_crs_uri)
+            target_crs = _get_target_crs(
+                crs_transform_spec, self.storage_crs_uri)
 
             coord_trans = _get_coordinate_transformation(crs_transform_spec)
+            
+            crs_uri = (
+                crs_transform_spec.target_crs_uri
+                if crs_transform_spec
+                else self.storage_crs_uri
+            )
 
-            items = results.order_by(*order_by_clauses).offset(offset).limit(limit)
+            _add_geojson_crs(response, crs_uri)
+
+            items = results.order_by(*order_by_clauses)
 
             for item in items:
                 response["numberReturned"] += 1
@@ -221,7 +240,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
     def get(
         self,
         identifier,
-        crs_transform_spec: Optional[CrsTransformSpec] = None,
+        crs_transform_spec: CrsTransformSpec | None = None,
         **kwargs,
     ):
         """
@@ -243,7 +262,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
             links_base = _determine_links_base_url(kwargs, self.links_base_url)
 
-            target_crs = _get_target_crs(crs_transform_spec, self.storage_crs_uri)
+            target_crs = _get_target_crs(
+                crs_transform_spec, self.storage_crs_uri)
 
             coord_trans = _get_coordinate_transformation(crs_transform_spec)
 
@@ -276,7 +296,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         target_crs: str,
         coord_trans: osr.CoordinateTransformation | None,
         select_properties: List[str],
-        links_base: Optional[str] = None,
+        links_base: str | None = None,
     ) -> Dict[str, Any]:
         feature: Dict[str, Any] = {"type": "Feature"}
 
@@ -323,7 +343,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         bbox_crs84 = transform_bbox(bbox, self.storage_crs_uri, DEFAULT_CRS)
         storage_srid = self.storage_crs.to_epsg()
-        envelope = ST_Transform(ST_MakeEnvelope(*bbox_crs84, 4326), storage_srid)
+        envelope = ST_Transform(ST_MakeEnvelope(
+            *bbox_crs84, 4326), storage_srid)
 
         geom_column = getattr(self.table_model, self.geom)
         bbox_filter = ST_Intersects(envelope, geom_column)
@@ -486,7 +507,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
     #         item_dict[key] = mapped_value[1] if mapped_value else value
 
     def _add_provider_links(
-        self, feature: Dict[str, Any], feature_id: Any, links_base: Optional[str]
+        self, feature: Dict[str, Any], feature_id: Any, links_base: str | None
     ) -> None:
         if not getattr(self, "link_templates", None):
             return
@@ -592,7 +613,7 @@ def _get_table_ids(table_model, id_field, session: Session) -> List[Any]:
     return ids
 
 
-def _find_identifier_index(ids: List[Any], identifier: str) -> Optional[int]:
+def _find_identifier_index(ids: List[Any], identifier: str) -> int | None:
     try:
         return ids.index(identifier)
     except ValueError:
@@ -600,8 +621,8 @@ def _find_identifier_index(ids: List[Any], identifier: str) -> Optional[int]:
 
 
 def _determine_links_base_url(
-    kwargs: Dict[str, Any], provider_base: Optional[str]
-) -> Optional[str]:
+    kwargs: Dict[str, Any], provider_base: str | None
+) -> str | None:
     if not isinstance(kwargs, dict):
         kwargs = {}
 
@@ -631,7 +652,8 @@ def _determine_links_base_url(
     headers = kwargs.get("headers") or kwargs.get("request_headers")
 
     if isinstance(headers, dict):
-        proto = headers.get("X-Forwarded-Proto") or headers.get("Forwarded-Proto")
+        proto = headers.get(
+            "X-Forwarded-Proto") or headers.get("Forwarded-Proto")
         host = headers.get("X-Forwarded-Host") or headers.get("Host")
 
         if proto and host:
@@ -669,7 +691,7 @@ def _determine_links_base_url(
 
 
 def _merge_links(
-    feature: Dict[str, Any], candidates: List[Dict[str, Any]], base_href: Optional[str]
+    feature: Dict[str, Any], candidates: List[Dict[str, Any]], base_href: str | None
 ) -> None:
     links = feature.setdefault("links", [])
 
@@ -699,7 +721,7 @@ def _merge_links(
         existing_links.add(key)
 
 
-def _get_link_base_href(links: List[Dict[str, Any]]) -> Optional[str]:
+def _get_link_base_href(links: List[Dict[str, Any]]) -> str | None:
     for rel_name in ("self", "collection"):
         for link in links:
             if not isinstance(link, dict):
@@ -719,8 +741,8 @@ def _get_link_base_href(links: List[Dict[str, Any]]) -> Optional[str]:
 
 
 def _prepare_link(
-    candidate: Dict[str, Any], primary_base: Optional[str], fallback_base: Optional[str]
-) -> Optional[Dict[str, Any]]:
+    candidate: Dict[str, Any], primary_base: str | None, fallback_base: str | None
+) -> Dict[str, Any] | None:
     if not isinstance(candidate, dict):
         return None
 
@@ -760,7 +782,7 @@ def _prepare_link(
     return prepared
 
 
-def _resolve_link_href(target: str, base_href: Optional[str]) -> str:
+def _resolve_link_href(target: str, base_href: str | None) -> str:
     if not target:
         return ""
 
@@ -773,7 +795,8 @@ def _resolve_link_href(target: str, base_href: Optional[str]) -> str:
         base_parts = urlsplit(base_href)
 
         if target_parts.path.startswith("/"):
-            combined_path = (base_parts.path.rstrip("/") + target_parts.path) or "/"
+            combined_path = (base_parts.path.rstrip(
+                "/") + target_parts.path) or "/"
 
             return urlunsplit(
                 (
@@ -793,7 +816,7 @@ def _resolve_link_href(target: str, base_href: Optional[str]) -> str:
     return target
 
 
-def _normalize_base_href(base_href: Optional[str]) -> Optional[str]:
+def _normalize_base_href(base_href: str | None) -> str | None:
     if not base_href:
         return None
 
@@ -805,7 +828,7 @@ def _normalize_base_href(base_href: Optional[str]) -> Optional[str]:
     return base
 
 
-def _derive_base_href(url: Optional[str]) -> Optional[str]:
+def _derive_base_href(url: str | None) -> str | None:
     if not url:
         return None
 
@@ -834,7 +857,7 @@ def _derive_base_href(url: Optional[str]) -> Optional[str]:
     return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 
-def _is_absolute_href(href: Optional[str]) -> bool:
+def _is_absolute_href(href: str | None) -> bool:
     if not href:
         return False
 
@@ -845,7 +868,7 @@ def _is_absolute_href(href: Optional[str]) -> bool:
 
 def _render_link_template(
     template: Dict[str, Any], context: Dict[str, Any]
-) -> Optional[Dict[str, Any]]:
+) -> Dict[str, Any] | None:
     if not isinstance(template, dict):
         return None
 
@@ -941,7 +964,8 @@ def _get_field_mapping_data(
         )
         mapping_data.update(codelist_mapping_data)
 
-    table_mappings = [item for item in field_mappings.items() if "table" in item[1]]
+    table_mappings = [item for item in field_mappings.items()
+                      if "table" in item[1]]
 
     if table_mappings:
         table_mapping_data = _create_field_mapping_data_from_tables(
@@ -987,7 +1011,8 @@ def _create_field_mapping_data_from_codelists(
         try:
             mapping_data[key] = _get_codelist(url)
         except Exception as err:
-            LOGGER.warning(f"Could not create mapping data from codelist {url}: {err}")
+            LOGGER.warning(
+                f"Could not create mapping data from codelist {url}: {err}")
 
     return mapping_data
 
