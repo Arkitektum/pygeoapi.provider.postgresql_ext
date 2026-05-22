@@ -7,6 +7,35 @@ support for:
 - field/value mappings from lookup tables or GML codelists
 - cached lookups for previous/next items within a collection
 - templated related links surfaced through the feature `links` array
+- selectable property shape (`dotted` | `nested` | `flat_leaf`) for
+  collections whose columns use dot-separated naming
+
+## Property shape
+
+Set `property_shape` in your provider definition to control how columns
+with dot-separated names (e.g. `identifikasjon.lokalId`) appear in
+feature properties and in the queryable schema.
+
+| Mode | Output keys for `identifikasjon.lokalId` | Use case |
+| --- | --- | --- |
+| `nested` (default) | `{"identifikasjon": {"lokalId": ...}}` | GeoJSON consumers expecting nested objects |
+| `flat_leaf` | `lokalId` | Legacy / flat consumers; collisions overwrite |
+| `dotted` | `identifikasjon.lokalId` | Required by the GML formatter contract |
+
+```yaml
+providers:
+  - type: feature
+    name: postgresql_ext.PostgreSQLExtendedProvider
+    property_shape: dotted
+```
+
+The same shape is applied to `/queryables`, so filter expressions match
+the form clients see in feature properties.
+
+The previous `flatten_properties: true|false` option still works as a
+deprecated alias (`true` → `flat_leaf`, `false` → `nested`) and logs a
+deprecation warning at provider startup. If both keys are set,
+`property_shape` wins.
 
 ## Related links between collections
 

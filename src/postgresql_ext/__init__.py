@@ -23,6 +23,15 @@ _sessions_cache = TTLCache(maxsize=640 * 1024, ttl=86400)
 LOGGER = logging.getLogger(__name__)
 DEFAULT_CRS = "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
 
+PROPERTY_SHAPE_NESTED = "nested"
+PROPERTY_SHAPE_FLAT_LEAF = "flat_leaf"
+PROPERTY_SHAPE_DOTTED = "dotted"
+PROPERTY_SHAPES = (
+    PROPERTY_SHAPE_NESTED,
+    PROPERTY_SHAPE_FLAT_LEAF,
+    PROPERTY_SHAPE_DOTTED,
+)
+
 
 class PostgreSQLExtendedProvider(PostgreSQLProvider):
     """
@@ -31,7 +40,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
       * Supports field mappings for richer JSON schema
       * Caches table IDs for faster creation of fields for previous and next items
       * Improved performance when querying large tables
-      * Converts dot-concatenated fields to objects (or flattens with underscores)
+      * Selectable property shape (dotted | nested | flat_leaf)
       * Fixes a bug related to BBOX filtering
     """
 
@@ -40,7 +49,10 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         self.field_mappings: Dict[str, Any] = provider_def.get("field_mappings", {})
         self.has_curve_geoms: bool = provider_def.get("curve_geoms", False)
         self.excluded_properties: List[str] = provider_def.get("exclude_properties", [])
-        self.flatten_properties: bool = provider_def.get("flatten_properties", False)
+
+        self.property_shape: str = _resolve_property_shape(provider_def)
+        # Retained for any external callers reading the legacy attribute.
+        self.flatten_properties: bool = self.property_shape == PROPERTY_SHAPE_FLAT_LEAF
 
         super().__init__(provider_def)
 
@@ -60,8 +72,11 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
     @property
     def fields(self) -> Dict:
-        if self.flatten_properties:
+        if self.property_shape == PROPERTY_SHAPE_FLAT_LEAF:
             return {key.split(".")[-1]: value for key, value in self._fields.items()}
+
+        if self.property_shape == PROPERTY_SHAPE_DOTTED:
+            return dict(self._fields)
 
         result: Dict = {}
 
@@ -133,7 +148,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         :returns: GeoJSON FeatureCollection
         """
 
-        if self.flatten_properties and properties:
+        if self.property_shape == PROPERTY_SHAPE_FLAT_LEAF and properties:
             properties = [
                 (self._unflatten_property_name(name), value)
                 for name, value in properties
@@ -296,10 +311,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             if key in item_dict:
                 properties[key] = item_dict[key]
 
-        if self.flatten_properties:
-            feature["properties"] = self._flatten_properties(properties)
-        else:
-            feature["properties"] = self._objectify_properties(properties)
+        feature["properties"] = self._shape_properties(properties)
 
         self._add_provider_links(feature, feature_id, links_base)
 
@@ -389,6 +401,15 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 return key
 
         return name
+
+    def _shape_properties(self, properties: Dict[str, Any]) -> Dict[str, Any]:
+        if self.property_shape == PROPERTY_SHAPE_FLAT_LEAF:
+            return self._flatten_properties(properties)
+
+        if self.property_shape == PROPERTY_SHAPE_DOTTED:
+            return dict(properties)
+
+        return self._objectify_properties(properties)
 
     def _flatten_properties(self, properties: Dict[str, Any]) -> Dict[str, Any]:
         return {key.split(".")[-1]: value for key, value in properties.items()}
@@ -490,6 +511,36 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
     def _get_collection_namespace(self) -> str:
         return f"{self.db_name}.{self.db_search_path[0]}.{self.table}"
+
+
+def _resolve_property_shape(provider_def: Dict[str, Any]) -> str:
+    explicit = provider_def.get("property_shape")
+    legacy = provider_def.get("flatten_properties")
+
+    if explicit is not None:
+        if explicit not in PROPERTY_SHAPES:
+            raise ValueError(
+                f"property_shape must be one of {PROPERTY_SHAPES!r}, got {explicit!r}"
+            )
+
+        if legacy is not None:
+            LOGGER.warning(
+                "Both property_shape and flatten_properties are set; "
+                "property_shape=%r takes precedence.",
+                explicit,
+            )
+
+        return explicit
+
+    if legacy is None:
+        return PROPERTY_SHAPE_NESTED
+
+    LOGGER.warning(
+        "flatten_properties is deprecated; use property_shape: %s instead.",
+        PROPERTY_SHAPE_FLAT_LEAF if legacy else PROPERTY_SHAPE_NESTED,
+    )
+
+    return PROPERTY_SHAPE_FLAT_LEAF if legacy else PROPERTY_SHAPE_NESTED
 
 
 def _get_coordinate_transformation(
