@@ -1,4 +1,5 @@
 import json
+import os
 from copy import deepcopy
 import logging
 import xml.etree.ElementTree as ET
@@ -20,6 +21,7 @@ osr.UseExceptions()
 
 _sessions_cache = TTLCache(maxsize=640 * 1024, ttl=86400)
 _count_cache = TTLCache(maxsize=10240, ttl=86400)
+_signal_mtime: float = 0.0
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_CRS = "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
@@ -54,6 +56,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         self.property_shape: str = _resolve_property_shape(provider_def)
         # Retained for any external callers reading the legacy attribute.
         self.flatten_properties: bool = self.property_shape == PROPERTY_SHAPE_FLAT_LEAF
+
+        self.cache_signal_path: str | None = provider_def.get("cache_signal_path")
 
         super().__init__(provider_def)
 
@@ -148,6 +152,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         :returns: GeoJSON FeatureCollection
         """
+        self._check_cache_signal()
+
         if self.property_shape == PROPERTY_SHAPE_FLAT_LEAF and properties:
             properties = [
                 (self._unflatten_property_name(name), value)
@@ -258,6 +264,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         :returns: GeoJSON FeatureCollection
         """
+        self._check_cache_signal()
 
         with Session(self._engine) as session:
             item = session.get(self.table_model, identifier)
@@ -537,6 +544,10 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
     def _get_collection_namespace(self) -> str:
         return f"{self.db_name}.{self.db_search_path[0]}.{self.table}"
 
+    def _check_cache_signal(self) -> None:
+        if self.cache_signal_path:
+            _maybe_invalidate_from_signal(self.cache_signal_path)
+
 
 def _resolve_property_shape(provider_def: Dict[str, Any]) -> str:
     explicit = provider_def.get("property_shape")
@@ -646,8 +657,28 @@ def _get_matched_count(
 
 
 def flush_count_cache() -> None:
-    """Invalidate all cached numberMatched values. Call after pg-data-sync."""
+    """Invalidate cached numberMatched values (in-process only)."""
     _count_cache.clear()
+
+
+def flush_caches() -> None:
+    """Invalidate both module-level TTL caches (in-process only)."""
+    _count_cache.clear()
+    _sessions_cache.clear()
+
+
+def _maybe_invalidate_from_signal(signal_path: str) -> None:
+    """Flush caches if signal_path's mtime is newer than the last seen."""
+    global _signal_mtime
+
+    try:
+        current = os.stat(signal_path).st_mtime
+    except FileNotFoundError:
+        return
+
+    if current > _signal_mtime:
+        _signal_mtime = current
+        flush_caches()
 
 
 def _find_identifier_index(ids: List[Any], identifier: str) -> int | None:

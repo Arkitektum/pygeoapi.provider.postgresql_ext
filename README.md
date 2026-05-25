@@ -39,6 +39,36 @@ shorthand for the two binary modes (`true` → `flat_leaf`, `false` →
 If both keys are set on the same provider, `property_shape` takes
 precedence and a warning is logged.
 
+## Cache invalidation
+
+`numberMatched` counts and prev/next id sets are cached in-process with a
+24-hour TTL. To force invalidation after a data swap (e.g. pg-data-sync),
+configure a sentinel file the provider watches:
+
+```yaml
+providers:
+  - type: feature
+    name: postgresql_ext.PostgreSQLExtendedProvider
+    cache_signal_path: /var/run/pygeoapi/sync.signal
+```
+
+The provider checks the file's mtime at the start of every `query()` and
+`get()`. When the mtime advances, both `_count_cache` and `_sessions_cache`
+are cleared. The sync process triggers invalidation with a single touch:
+
+```python
+from pathlib import Path
+Path("/var/run/pygeoapi/sync.signal").touch()
+```
+
+The file does not need to exist at startup. A missing file is a no-op.
+Cost per request is one `os.stat()` (kernel-cached, sub-microsecond).
+Each pygeoapi worker process tracks its own last-seen mtime, so a single
+touch invalidates caches across every worker that shares the volume.
+
+For same-process invalidation (tests, in-process operators), call
+`postgresql_ext.flush_caches()` directly.
+
 ## Related links between collections
 
 Use the optional `links` block in your provider definition to expose links that
