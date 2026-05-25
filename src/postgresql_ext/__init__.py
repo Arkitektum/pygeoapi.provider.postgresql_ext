@@ -19,6 +19,7 @@ ogr.UseExceptions()
 osr.UseExceptions()
 
 _sessions_cache = TTLCache(maxsize=640 * 1024, ttl=86400)
+_count_cache = TTLCache(maxsize=10240, ttl=86400)
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_CRS = "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
@@ -45,10 +46,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
     """
 
     def __init__(self, provider_def: dict):
-        self.storage_crs_uri: str = provider_def.get(
-            "storage_crs", DEFAULT_STORAGE_CRS)
-        self.field_mappings: Dict[str, Any] = provider_def.get(
-            "field_mappings", {})
+        self.storage_crs_uri: str = provider_def.get("storage_crs", DEFAULT_STORAGE_CRS)
+        self.field_mappings: Dict[str, Any] = provider_def.get("field_mappings", {})
         self.has_curve_geoms: bool = provider_def.get("curve_geoms", False)
         self.excluded_properties: List[str] = provider_def.get("exclude_properties", [])
 
@@ -149,12 +148,6 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         :returns: GeoJSON FeatureCollection
         """
-        if self.flatten_properties and properties:
-            properties = [
-                (self._unflatten_property_name(name), value)
-                for name, value in properties
-            ]
-
         if self.property_shape == PROPERTY_SHAPE_FLAT_LEAF and properties:
             properties = [
                 (self._unflatten_property_name(name), value)
@@ -204,19 +197,32 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 )
 
             response: Dict[str, Any] = {"type": "FeatureCollection"}
-
             response["features"] = []
-            response["numberMatched"] = results.count()
             response["numberReturned"] = 0
+            response["numberMatched"] = _get_matched_count(
+                self.table,
+                tuple(properties),
+                tuple(bbox or ()),
+                datetime_,
+                filterq,
+                session,
+                self.table_model,
+                property_filters,
+                cql_filters,
+                bbox_filter,
+                time_filter,
+            )
 
-            if resulttype == "hits" or not results:
+            if resulttype == "hits":
                 return response
 
-            target_crs = _get_target_crs(
-                crs_transform_spec, self.storage_crs_uri)
+            if not results:
+                return response
+
+            target_crs = _get_target_crs(crs_transform_spec, self.storage_crs_uri)
 
             coord_trans = _get_coordinate_transformation(crs_transform_spec)
-            
+
             crs_uri = (
                 crs_transform_spec.target_crs_uri
                 if crs_transform_spec
@@ -262,8 +268,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
             links_base = _determine_links_base_url(kwargs, self.links_base_url)
 
-            target_crs = _get_target_crs(
-                crs_transform_spec, self.storage_crs_uri)
+            target_crs = _get_target_crs(crs_transform_spec, self.storage_crs_uri)
 
             coord_trans = _get_coordinate_transformation(crs_transform_spec)
 
@@ -343,8 +348,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         bbox_crs84 = transform_bbox(bbox, self.storage_crs_uri, DEFAULT_CRS)
         storage_srid = self.storage_crs.to_epsg()
-        envelope = ST_Transform(ST_MakeEnvelope(
-            *bbox_crs84, 4326), storage_srid)
+        envelope = ST_Transform(ST_MakeEnvelope(*bbox_crs84, 4326), storage_srid)
 
         geom_column = getattr(self.table_model, self.geom)
         bbox_filter = ST_Intersects(envelope, geom_column)
@@ -536,7 +540,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
 def _resolve_property_shape(provider_def: Dict[str, Any]) -> str:
     explicit = provider_def.get("property_shape")
-    legacy = provider_def.get("flatten_properties")
+    flatten = provider_def.get("flatten_properties")
 
     if explicit is not None:
         if explicit not in PROPERTY_SHAPES:
@@ -544,7 +548,7 @@ def _resolve_property_shape(provider_def: Dict[str, Any]) -> str:
                 f"property_shape must be one of {PROPERTY_SHAPES!r}, got {explicit!r}"
             )
 
-        if legacy is not None:
+        if flatten is not None:
             LOGGER.warning(
                 "Both property_shape and flatten_properties are set; "
                 "property_shape=%r takes precedence.",
@@ -553,15 +557,10 @@ def _resolve_property_shape(provider_def: Dict[str, Any]) -> str:
 
         return explicit
 
-    if legacy is None:
+    if flatten is None:
         return PROPERTY_SHAPE_NESTED
 
-    LOGGER.warning(
-        "flatten_properties is deprecated; use property_shape: %s instead.",
-        PROPERTY_SHAPE_FLAT_LEAF if legacy else PROPERTY_SHAPE_NESTED,
-    )
-
-    return PROPERTY_SHAPE_FLAT_LEAF if legacy else PROPERTY_SHAPE_NESTED
+    return PROPERTY_SHAPE_FLAT_LEAF if flatten else PROPERTY_SHAPE_NESTED
 
 
 def _get_coordinate_transformation(
@@ -613,6 +612,44 @@ def _get_table_ids(table_model, id_field, session: Session) -> List[Any]:
     return ids
 
 
+@cached(
+    cache=_count_cache,
+    key=lambda table, properties, bbox, datetime_, filterq, *_: keys.hashkey(
+        table,
+        properties,
+        bbox,
+        datetime_,
+        filterq,
+    ),
+)
+def _get_matched_count(
+    table: str,
+    properties: Tuple,
+    bbox: Tuple,
+    datetime_: str | None,
+    filterq: str | None,
+    session: Session,
+    table_model: Any,
+    property_filters: Any,
+    cql_filters: Any,
+    bbox_filter: Any,
+    time_filter: Any,
+) -> int:
+    return (
+        session.query(table_model)
+        .filter(property_filters)
+        .filter(cql_filters)
+        .filter(bbox_filter)
+        .filter(time_filter)
+        .count()
+    )
+
+
+def flush_count_cache() -> None:
+    """Invalidate all cached numberMatched values. Call after pg-data-sync."""
+    _count_cache.clear()
+
+
 def _find_identifier_index(ids: List[Any], identifier: str) -> int | None:
     try:
         return ids.index(identifier)
@@ -652,8 +689,7 @@ def _determine_links_base_url(
     headers = kwargs.get("headers") or kwargs.get("request_headers")
 
     if isinstance(headers, dict):
-        proto = headers.get(
-            "X-Forwarded-Proto") or headers.get("Forwarded-Proto")
+        proto = headers.get("X-Forwarded-Proto") or headers.get("Forwarded-Proto")
         host = headers.get("X-Forwarded-Host") or headers.get("Host")
 
         if proto and host:
@@ -795,8 +831,7 @@ def _resolve_link_href(target: str, base_href: str | None) -> str:
         base_parts = urlsplit(base_href)
 
         if target_parts.path.startswith("/"):
-            combined_path = (base_parts.path.rstrip(
-                "/") + target_parts.path) or "/"
+            combined_path = (base_parts.path.rstrip("/") + target_parts.path) or "/"
 
             return urlunsplit(
                 (
@@ -964,8 +999,7 @@ def _get_field_mapping_data(
         )
         mapping_data.update(codelist_mapping_data)
 
-    table_mappings = [item for item in field_mappings.items()
-                      if "table" in item[1]]
+    table_mappings = [item for item in field_mappings.items() if "table" in item[1]]
 
     if table_mappings:
         table_mapping_data = _create_field_mapping_data_from_tables(
@@ -1011,8 +1045,7 @@ def _create_field_mapping_data_from_codelists(
         try:
             mapping_data[key] = _get_codelist(url)
         except Exception as err:
-            LOGGER.warning(
-                f"Could not create mapping data from codelist {url}: {err}")
+            LOGGER.warning(f"Could not create mapping data from codelist {url}: {err}")
 
     return mapping_data
 

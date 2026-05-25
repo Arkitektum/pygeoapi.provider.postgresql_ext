@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:docs.ogc.org)",
+      "WebFetch(domain:schemas.opengis.net)",
+      "Bash(apt list *)"
+    ]
+  }
+}

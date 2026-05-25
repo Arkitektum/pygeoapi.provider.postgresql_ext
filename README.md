@@ -32,10 +32,12 @@ providers:
 The same shape is applied to `/queryables`, so filter expressions match
 the form clients see in feature properties.
 
-The previous `flatten_properties: true|false` option still works as a
-deprecated alias (`true` → `flat_leaf`, `false` → `nested`) and logs a
-deprecation warning at provider startup. If both keys are set,
-`property_shape` wins.
+`flatten_properties: true|false` is an equivalent, fully supported
+shorthand for the two binary modes (`true` → `flat_leaf`, `false` →
+`nested`). Use it when those two modes cover your needs;
+`property_shape` is the more expressive form when `dotted` is required.
+If both keys are set on the same provider, `property_shape` takes
+precedence and a warning is logged.
 
 ## Related links between collections
 

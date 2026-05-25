@@ -64,19 +64,20 @@ class TestResolvePropertyShape:
         with pytest.raises(ValueError, match="property_shape must be one of"):
             _resolve_property_shape({"property_shape": "bogus"})
 
-    def test_legacy_true_maps_to_flat_leaf(self, caplog):
+    def test_flatten_true_maps_to_flat_leaf(self, caplog):
         with caplog.at_level(logging.WARNING):
             shape = _resolve_property_shape({"flatten_properties": True})
         assert shape == PROPERTY_SHAPE_FLAT_LEAF
-        assert any("deprecated" in r.message for r in caplog.records)
+        # flatten_properties on its own is supported, not deprecated.
+        assert caplog.records == []
 
-    def test_legacy_false_maps_to_nested(self, caplog):
+    def test_flatten_false_maps_to_nested(self, caplog):
         with caplog.at_level(logging.WARNING):
             shape = _resolve_property_shape({"flatten_properties": False})
         assert shape == PROPERTY_SHAPE_NESTED
-        assert any("deprecated" in r.message for r in caplog.records)
+        assert caplog.records == []
 
-    def test_explicit_wins_over_legacy(self, caplog):
+    def test_explicit_wins_when_both_set(self, caplog):
         with caplog.at_level(logging.WARNING):
             shape = _resolve_property_shape(
                 {"property_shape": "dotted", "flatten_properties": True}
