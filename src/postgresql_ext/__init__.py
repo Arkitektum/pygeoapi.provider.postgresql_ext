@@ -6,8 +6,9 @@ import xml.etree.ElementTree as ET
 from typing import Dict, List, Tuple, Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from osgeo import ogr, osr
-from sqlalchemy import Engine, text, select
-from sqlalchemy.orm import Session, load_only
+from sqlalchemy import Engine, case, text, select
+from sqlalchemy.orm import Session, class_mapper, column_property, load_only
+from sqlalchemy.sql import func
 from geoalchemy2 import WKBElement
 from geoalchemy2.functions import ST_Intersects, ST_MakeEnvelope, ST_Transform
 from cachetools import cached, TTLCache, keys
@@ -35,6 +36,9 @@ PROPERTY_SHAPES = (
     PROPERTY_SHAPE_DOTTED,
 )
 
+GEOMETRY_GML_KEY = "_geometry_gml"
+DERIVED_POINT_GML_KEY = "_derived_point_gml"
+
 
 class PostgreSQLExtendedProvider(PostgreSQLProvider):
     """
@@ -59,7 +63,33 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         self.cache_signal_path: str | None = provider_def.get("cache_signal_path")
 
+        self.gml_passthrough: bool = provider_def.get("gml_passthrough", False)
+        self.derived_point_passthrough: bool = provider_def.get(
+            "derived_point_passthrough", False
+        )
+        self.gml_options: int = provider_def.get("gml_options", 1)
+        self.gml_precision: int = provider_def.get("gml_precision", 15)
+        self.gml_unwrap_multi: bool = provider_def.get("gml_unwrap_multi", True)
+
+        if self.derived_point_passthrough and not self.gml_passthrough:
+            LOGGER.warning(
+                "derived_point_passthrough requires gml_passthrough; ignoring."
+            )
+
+        synthetic_keys: List[str] = []
+
+        if self.gml_passthrough:
+            synthetic_keys.append(GEOMETRY_GML_KEY)
+
+            if self.derived_point_passthrough:
+                synthetic_keys.append(DERIVED_POINT_GML_KEY)
+
+        self._synthetic_keys: Tuple[str, ...] = tuple(synthetic_keys)
+
         super().__init__(provider_def)
+
+        if self.gml_passthrough:
+            self._attach_gml_columns()
 
         # field_mappings = provider_def.get('field_mappings', [])
         # namespace = self._get_collection_namespace()
@@ -212,7 +242,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 datetime_,
                 filterq,
                 session,
-                self.table_model,
+                getattr(self.table_model, self.id_field),
                 property_filters,
                 cql_filters,
                 bbox_filter,
@@ -295,7 +325,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 dropping_keys = deepcopy(props).keys()
 
                 for item in dropping_keys:
-                    if item not in self.properties:
+                    if item not in self.properties and item not in self._synthetic_keys:
                         props.pop(item)
 
             self._set_prev_and_next(identifier, feature, session)
@@ -345,6 +375,12 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         feature["properties"] = self._shape_properties(properties)
 
+        # Synthetic GML keys are formatter-contract keys, not user data:
+        # they bypass property_shape and land verbatim at the top level.
+        for key in self._synthetic_keys:
+            if key in item_dict:
+                feature["properties"][key] = item_dict[key]
+
         self._add_provider_links(feature, feature_id, links_base)
 
         return feature
@@ -370,7 +406,11 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
     def _get_properties(self, select_properties: List[str]) -> List[str]:
         keys = self._expand_property_prefixes(select_properties) or self._fields.keys()
-        filtered = [key for key in keys if key not in self.excluded_properties]
+        filtered = [
+            key
+            for key in keys
+            if key not in self.excluded_properties and key not in self._synthetic_keys
+        ]
 
         return filtered
 
@@ -405,9 +445,10 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             column_names = self.properties
 
         column_names = self._expand_property_prefixes(column_names)
+        # Synthetic GML columns always load; the formatter contract needs them.
+        column_names = list(column_names) + list(self._synthetic_keys)
 
         if not skip_geometry:
-            column_names = list(column_names)
             column_names.append(self.geom)
 
         selected_columns = []
@@ -548,6 +589,60 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         if self.cache_signal_path:
             _maybe_invalidate_from_signal(self.cache_signal_path)
 
+    def _attach_gml_columns(self) -> None:
+        """Attach server-rendered GML columns to the mapped model.
+
+        The expressions mirror gml-export's MV pipeline: single-component
+        Multi* geometries are unwrapped (SOSI XSDs reject Multi* property
+        wrappers) and ST_AsGML emits GML 3.2 with long CRS URNs. Geometries
+        are NOT validated; invalid source geoms serialize to invalid GML.
+        """
+        mapper = class_mapper(self.table_model)
+
+        if GEOMETRY_GML_KEY in mapper.attrs:
+            return
+
+        geom_col = getattr(self.table_model, self.geom)
+
+        if self.gml_unwrap_multi:
+            geom_expr = case(
+                (
+                    func.ST_NumGeometries(geom_col) == 1,
+                    func.ST_GeometryN(geom_col, 1),
+                ),
+                else_=geom_col,
+            )
+        else:
+            geom_expr = geom_col
+
+        mapper.add_property(
+            GEOMETRY_GML_KEY,
+            column_property(
+                func.ST_AsGML(3, geom_expr, self.gml_precision, self.gml_options)
+            ),
+        )
+
+        if not self.derived_point_passthrough:
+            return
+
+        # Start point for lines, passthrough for points (RpPåskrift).
+        point_expr = case(
+            (
+                func.ST_GeometryType(geom_col).in_(
+                    ("ST_LineString", "ST_MultiLineString")
+                ),
+                func.ST_PointN(geom_expr, 1),
+            ),
+            else_=geom_col,
+        )
+
+        mapper.add_property(
+            DERIVED_POINT_GML_KEY,
+            column_property(
+                func.ST_AsGML(3, point_expr, self.gml_precision, self.gml_options)
+            ),
+        )
+
 
 def _resolve_property_shape(provider_def: Dict[str, Any]) -> str:
     explicit = provider_def.get("property_shape")
@@ -640,19 +735,21 @@ def _get_matched_count(
     datetime_: str | None,
     filterq: str | None,
     session: Session,
-    table_model: Any,
+    id_column: Any,
     property_filters: Any,
     cql_filters: Any,
     bbox_filter: Any,
     time_filter: Any,
 ) -> int:
+    # Count the id column directly: no subquery wrap, and attached
+    # column_property expressions (ST_AsGML) never enter the statement.
     return (
-        session.query(table_model)
+        session.query(func.count(id_column))
         .filter(property_filters)
         .filter(cql_filters)
         .filter(bbox_filter)
         .filter(time_filter)
-        .count()
+        .scalar()
     )
 
 

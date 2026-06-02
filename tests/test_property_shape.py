@@ -26,6 +26,7 @@ class _StubProvider(PostgreSQLExtendedProvider):
         self.flatten_properties = property_shape == PROPERTY_SHAPE_FLAT_LEAF
         self._fields = fields or {}
         self.field_mappings = {}
+        self._synthetic_keys = ()
 
 
 SAMPLE_FIELDS = {

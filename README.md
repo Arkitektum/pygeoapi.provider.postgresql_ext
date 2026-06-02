@@ -69,6 +69,44 @@ touch invalidates caches across every worker that shares the volume.
 For same-process invalidation (tests, in-process operators), call
 `postgresql_ext.flush_caches()` directly.
 
+## GML passthrough
+
+For collections consumed by a GML formatter (e.g.
+`pygeoapi.formatter.gml-npad`), the provider can attach server-rendered
+GML 3.2 geometry strings as synthetic feature properties, computed by
+PostGIS `ST_AsGML` at query time:
+
+```yaml
+providers:
+  - type: feature
+    name: postgresql_ext.PostgreSQLExtendedProvider
+    property_shape: dotted
+    gml_passthrough: true
+    derived_point_passthrough: true   # only for collections needing label points
+    gml_options: 1                    # ST_AsGML options bitmask (default 1: long CRS URN, curve-aware)
+    gml_precision: 15                 # max decimal digits (default 15)
+    gml_unwrap_multi: true            # unwrap single-component Multi* (default true)
+```
+
+With `gml_passthrough: true` every feature gains a `_geometry_gml`
+property containing the raw `ST_AsGML(3, geom, precision, options)`
+output. Single-component Multi* geometries are unwrapped to their only
+member first (`gml_unwrap_multi`), since several application schemas
+reject Multi* wrappers in singular property types.
+`derived_point_passthrough: true` adds `_derived_point_gml`: the start
+point for line geometries, the geometry itself for points.
+
+The synthetic keys are contract keys, not user data: they bypass
+`property_shape`, always appear top-level in `properties`, are excluded
+from `/queryables`, and cannot be requested via `?properties=`. They are
+not available for filtering or sorting.
+
+Use `gml_options: 5` (adds flag 4) to emit linearized
+`LineString`/`Polygon` instead of curve-aware `Curve`/`Surface` output.
+
+Note: geometries are not validated. Invalid source geometries serialize
+to invalid GML — data quality is upstream of this provider.
+
 ## Related links between collections
 
 Use the optional `links` block in your provider definition to expose links that
