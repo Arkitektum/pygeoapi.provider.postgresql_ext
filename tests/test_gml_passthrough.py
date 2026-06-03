@@ -247,3 +247,27 @@ class TestSyntheticKeySurfacing:
 
         assert GEOMETRY_GML_KEY not in provider.fields
         assert GEOMETRY_GML_KEY not in provider._fields
+
+    def test_synthetic_property_keys_accessor_reports_geometry(self):
+        # Public accessor lets a format-aware caller (vendored pygeoapi)
+        # learn which keys to strip from the GeoJSON body without
+        # hardcoding key names.
+        model = _make_table_model()
+        provider = _GmlStub(model)
+
+        assert provider.synthetic_property_keys == (GEOMETRY_GML_KEY,)
+
+    def test_synthetic_property_keys_includes_derived_point(self):
+        model = _make_table_model()
+        provider = _GmlStub(model, derived_point_passthrough=True)
+
+        assert provider.synthetic_property_keys == (
+            GEOMETRY_GML_KEY,
+            DERIVED_POINT_GML_KEY,
+        )
+
+    def test_synthetic_property_keys_empty_without_passthrough(self):
+        model = _make_table_model()
+        provider = _GmlStub(model, gml_passthrough=False)
+
+        assert provider.synthetic_property_keys == ()

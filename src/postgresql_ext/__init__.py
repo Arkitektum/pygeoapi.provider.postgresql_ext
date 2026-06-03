@@ -133,6 +133,20 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         return result
 
+    @property
+    def synthetic_property_keys(self) -> Tuple[str, ...]:
+        """Property keys this provider injects for downstream formatters
+        rather than as user-facing data (e.g. ``_geometry_gml``).
+
+        They are always emitted at the top level of ``feature["properties"]``
+        (bypassing ``property_shape``) because an output formatter needs
+        them, but they are not part of the collection's queryable schema.
+        Format-aware callers — e.g. a vendored pygeoapi serving GeoJSON —
+        can read this to strip them from the JSON body while leaving the
+        formatter input intact. Empty unless ``gml_passthrough`` is set.
+        """
+        return self._synthetic_keys
+
     def get_fields(self) -> Dict:
         fields = super().get_fields()
 
