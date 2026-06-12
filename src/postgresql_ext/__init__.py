@@ -13,7 +13,10 @@ from geoalchemy2 import WKBElement
 from geoalchemy2.functions import ST_Intersects, ST_MakeEnvelope, ST_Transform
 from cachetools import cached, TTLCache, keys
 import requests
-from pygeoapi.provider.base import ProviderItemNotFoundError
+from pygeoapi.provider.base import (
+    ProviderInvalidQueryError,
+    ProviderItemNotFoundError,
+)
 from pygeoapi.provider.sql import PostgreSQLProvider
 from pygeoapi.crs import CrsTransformSpec, get_crs, transform_bbox, DEFAULT_STORAGE_CRS
 
@@ -477,6 +480,20 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             return load_only(getattr(self.table_model, self.id_field))
 
         return load_only(*selected_columns)
+
+    def _get_property_filters(self, properties):
+        # With include_extra_query_parameters, pygeoapi forwards any unknown
+        # query param as a property filter; reject names that are not mapped
+        # columns as 400 instead of letting getattr raise (HTTP 500).
+        if properties:
+            valid_names = {attr.key for attr in class_mapper(self.table_model).attrs}
+            for name, _ in properties:
+                if name not in valid_names:
+                    raise ProviderInvalidQueryError(
+                        user_msg=f"unknown query parameter: {name}"
+                    )
+
+        return super()._get_property_filters(properties)
 
     def _unflatten_property_name(self, name: str) -> str:
         """Map a flattened property name back to its dot-notated column name."""
