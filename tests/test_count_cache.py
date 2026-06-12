@@ -89,3 +89,64 @@ def test_signal_second_touch_flushes_again(tmp_path, monkeypatch):
     _maybe_invalidate_from_signal(str(signal))
 
     assert len(_count_cache) == 0
+
+
+class _StubQuery:
+    def __init__(self, value):
+        self._value = value
+
+    def filter(self, *_):
+        return self
+
+    def scalar(self):
+        return self._value
+
+
+class _StubSession:
+    def __init__(self, value):
+        self._value = value
+
+    def query(self, *_):
+        return _StubQuery(self._value)
+
+
+def _count_with_filter(cql2_json: str, value: int) -> int:
+    from pygeofilter.parsers.cql2_json import parse as parse_cql2_json
+
+    ast = parse_cql2_json(cql2_json)
+    return postgresql_ext._get_matched_count(
+        "public.planomrade",
+        (),
+        (),
+        None,
+        ast,
+        _StubSession(value),
+        None,
+        True,
+        True,
+        True,
+        True,
+    )
+
+
+def test_count_cache_accepts_pygeofilter_ast():
+    # Regression: pygeofilter AST nodes are unhashable dataclasses; the cache
+    # key must not hash them directly (TypeError in cachetools.keys).
+    flush_count_cache()
+
+    count = _count_with_filter('{"op": ">", "args": [{"property": "objid"}, 1962]}', 7)
+
+    assert count == 7
+
+
+def test_count_cache_distinguishes_filters_and_hits_on_equal_ast():
+    flush_count_cache()
+
+    first = _count_with_filter('{"op": ">", "args": [{"property": "objid"}, 1962]}', 7)
+    other = _count_with_filter('{"op": ">", "args": [{"property": "objid"}, 9999]}', 8)
+    # Re-parsed-but-equal filter must hit the cache: stub value 99 is ignored.
+    cached_ = _count_with_filter(
+        '{"op": ">", "args": [{"property": "objid"}, 1962]}', 99
+    )
+
+    assert (first, other, cached_) == (7, 8, 7)

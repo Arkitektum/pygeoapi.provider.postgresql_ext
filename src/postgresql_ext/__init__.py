@@ -734,12 +734,14 @@ def _get_table_ids(table_model, id_field, session: Session) -> List[Any]:
 
 @cached(
     cache=_count_cache,
+    # filterq is a pygeofilter AST (unhashable dataclasses) when a CQL filter
+    # is supplied; key on its repr, which is deterministic and field-complete.
     key=lambda table, properties, bbox, datetime_, filterq, *_: keys.hashkey(
         table,
         properties,
         bbox,
         datetime_,
-        filterq,
+        repr(filterq) if filterq is not None else None,
     ),
 )
 def _get_matched_count(
