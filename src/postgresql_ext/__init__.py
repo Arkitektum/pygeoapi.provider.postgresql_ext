@@ -14,6 +14,7 @@ import requests
 from pygeoapi.provider.base import ProviderItemNotFoundError
 from pygeoapi.provider.sql import PostgreSQLProvider
 from pygeoapi.crs import CrsTransformSpec, get_crs, transform_bbox, DEFAULT_STORAGE_CRS
+from .schema import json_schema_to_fields, json_schema_to_collection_schema
 
 ogr.UseExceptions()
 osr.UseExceptions()
@@ -38,6 +39,9 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
     def __init__(self, provider_def: dict):
         self.storage_crs_uri: str = provider_def.get(
             "storage_crs", DEFAULT_STORAGE_CRS)
+
+        self.schema: str | None = provider_def.get('schema')
+
         self.field_mappings: Dict[str, Any] = provider_def.get(
             "field_mappings", {})
         self.has_curve_geoms: bool = provider_def.get("curve_geoms", False)
@@ -47,12 +51,6 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             "flatten_properties", False)
 
         super().__init__(provider_def)
-
-        # field_mappings = provider_def.get('field_mappings', [])
-        # namespace = self._get_collection_namespace()
-
-        # self.field_mapping_data = _get_field_mapping_data(field_mappings, namespace,
-        #                                                   self._engine, self.db_search_path[0])
 
         self.link_templates = _normalize_link_config(provider_def.get("links"))
 
@@ -64,14 +62,22 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
     @property
     def fields(self) -> Dict:
+        fields = self.get_fields()
+
         if self.flatten_properties:
-            return {key.split(".")[-1]: value for key, value in self._fields.items()}
+            return {key.split(".")[-1]: value for key, value in fields.items()}
 
-        return self._fields
+        return fields
 
-    def get_fields(self) -> Dict:
+    def get_fields(self) -> Dict:        
+        if self.schema:
+            fields = json_schema_to_fields(self.schema)
+
+            if fields:
+                return fields
+
         fields = super().get_fields()
-
+        
         if not self.field_mappings:
             return fields
 
@@ -79,8 +85,14 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             if key in fields:
                 props: Dict = fields[key]
                 props.update(value)
-
+        
         return fields
+
+    def get_collection_schema(self) -> Dict | None:
+        if self.schema:
+            return json_schema_to_collection_schema(self.schema, self.id_field, self.time_field)
+
+        return None
 
     def query(
         self,
@@ -149,7 +161,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                     .offset(offset)
                     .limit(limit)
                     .cte("ids")
-                )
+                )                
 
                 results = (
                     session.query(self.table_model)
@@ -179,7 +191,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 crs_transform_spec, self.storage_crs_uri)
 
             coord_trans = _get_coordinate_transformation(crs_transform_spec)
-            
+
             crs_uri = (
                 crs_transform_spec.target_crs_uri
                 if crs_transform_spec
@@ -292,7 +304,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         for key in keys:
             if key in item_dict:
-                properties[key] = item_dict[key]
+                properties[key] = item_dict[key]        
 
         if self.flatten_properties:
             feature["properties"] = self._flatten_properties(properties)
@@ -325,7 +337,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
     def _get_properties(self, select_properties: List[str]) -> List[str]:
         keys = self._expand_property_prefixes(
-            select_properties) or self._fields.keys()
+            select_properties) or self.get_fields().keys()
         filtered = [key for key in keys if key not in self.excluded_properties]
 
         return filtered
@@ -341,12 +353,12 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         expanded: List[str] = []
 
         for name in names:
-            if name in self._fields:
+            if name in self.get_fields():
                 expanded.append(name)
                 continue
 
             children = [
-                key for key in self._fields if key.startswith(f"{name}.")]
+                key for key in self.get_fields() if key.startswith(f"{name}.")]
 
             if children:
                 expanded.extend(children)
@@ -356,7 +368,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         return expanded
 
     def _select_properties_clause(self, select_properties, skip_geometry=False):
-        column_names = list(select_properties or self._fields.keys())
+        column_names = list(select_properties or self.get_fields().keys())
 
         if self.properties:
             column_names = self.properties
@@ -382,10 +394,10 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
     def _unflatten_property_name(self, name: str) -> str:
         """Map a flattened property name back to its dot-notated column name."""
-        if name in self._fields:
+        if name in self.get_fields():
             return name
 
-        for key in self._fields:
+        for key in self.get_fields():
             if key.split(".")[-1] == name:
                 return key
 
