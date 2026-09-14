@@ -5,7 +5,7 @@ version = "0.5.2"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "pygeoapi>=0.22.0",
+    "pygeoapi>=0.24.0",
     "SQLAlchemy>2.0",
     "geoalchemy2",
     "pygeofilter",

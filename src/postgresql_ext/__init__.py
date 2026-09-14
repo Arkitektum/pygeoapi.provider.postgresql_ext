@@ -6,19 +6,20 @@ import xml.etree.ElementTree as ET
 from typing import Dict, List, Tuple, Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from osgeo import ogr, osr
-from sqlalchemy import Engine, case, text, select
+from sqlalchemy import case, select
 from sqlalchemy.orm import Session, class_mapper, column_property, load_only
 from sqlalchemy.sql import func
 from geoalchemy2 import WKBElement
 from geoalchemy2.functions import ST_Intersects, ST_MakeEnvelope, ST_Transform
 from cachetools import cached, TTLCache, keys
-import requests
+from functools import cached_property
 from pygeoapi.provider.base import (
     ProviderInvalidQueryError,
     ProviderItemNotFoundError,
 )
 from pygeoapi.provider.sql import PostgreSQLProvider
 from pygeoapi.crs import CrsTransformSpec, get_crs, transform_bbox, DEFAULT_STORAGE_CRS
+from .schema import json_schema_to_fields, json_schema_to_collection_schema
 
 ogr.UseExceptions()
 osr.UseExceptions()
@@ -26,8 +27,8 @@ osr.UseExceptions()
 _sessions_cache = TTLCache(maxsize=640 * 1024, ttl=86400)
 _count_cache = TTLCache(maxsize=10240, ttl=86400)
 _signal_mtime: float = 0.0
+_logger = logging.getLogger(__name__)
 
-LOGGER = logging.getLogger(__name__)
 DEFAULT_CRS = "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
 
 PROPERTY_SHAPE_NESTED = "nested"
@@ -55,16 +56,20 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
     """
 
     def __init__(self, provider_def: dict):
-        self.storage_crs_uri: str = provider_def.get("storage_crs", DEFAULT_STORAGE_CRS)
-        self.field_mappings: Dict[str, Any] = provider_def.get("field_mappings", {})
-        self.has_curve_geoms: bool = provider_def.get("curve_geoms", False)
-        self.excluded_properties: List[str] = provider_def.get("exclude_properties", [])
+        self.storage_crs_uri: str = provider_def.get(
+            "storage_crs", DEFAULT_STORAGE_CRS)
+
+        self.schema: str | None = provider_def.get("schema")
+
+        self.excluded_properties: List[str] = provider_def.get(
+            "exclude_properties", [])
 
         self.property_shape: str = _resolve_property_shape(provider_def)
         # Retained for any external callers reading the legacy attribute.
         self.flatten_properties: bool = self.property_shape == PROPERTY_SHAPE_FLAT_LEAF
 
-        self.cache_signal_path: str | None = provider_def.get("cache_signal_path")
+        self.cache_signal_path: str | None = provider_def.get(
+            "cache_signal_path")
 
         self.gml_passthrough: bool = provider_def.get("gml_passthrough", False)
         self.derived_point_passthrough: bool = provider_def.get(
@@ -72,10 +77,11 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         )
         self.gml_options: int = provider_def.get("gml_options", 1)
         self.gml_precision: int = provider_def.get("gml_precision", 15)
-        self.gml_unwrap_multi: bool = provider_def.get("gml_unwrap_multi", True)
+        self.gml_unwrap_multi: bool = provider_def.get(
+            "gml_unwrap_multi", True)
 
         if self.derived_point_passthrough and not self.gml_passthrough:
-            LOGGER.warning(
+            _logger.warning(
                 "derived_point_passthrough requires gml_passthrough; ignoring."
             )
 
@@ -93,12 +99,6 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         if self.gml_passthrough:
             self._attach_gml_columns()
-
-        # field_mappings = provider_def.get('field_mappings', [])
-        # namespace = self._get_collection_namespace()
-
-        # self.field_mapping_data = _get_field_mapping_data(field_mappings, namespace,
-        #                                                   self._engine, self.db_search_path[0])
 
         self.link_templates = _normalize_link_config(provider_def.get("links"))
 
@@ -132,7 +132,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                     current[part] = {"type": "object", "properties": {}}
                 current = current[part]["properties"]
 
-            current[parts[-1]] = {k: v for k, v in value.items() if v is not None}
+            current[parts[-1]] = {k: v for k,
+                                  v in value.items() if v is not None}
 
         return result
 
@@ -150,18 +151,26 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         """
         return self._synthetic_keys
 
+    @cached_property
+    def get_cached_fields(self) -> Dict:
+        if self.schema:
+            fields = json_schema_to_fields(self.schema)
+
+            if fields:
+                self._fields = fields
+                return self._fields
+
+        return super().get_fields()
+
     def get_fields(self) -> Dict:
-        fields = super().get_fields()
+        return self.get_cached_fields
 
-        if not self.field_mappings:
-            return fields
+    def get_collection_schema(self) -> Dict | None:
+        if self.schema:
+            return json_schema_to_collection_schema(
+                self.schema, self.id_field, self.time_field, flatten=self.flatten_properties)
 
-        for key, value in self.field_mappings.items():
-            if key in fields:
-                props: Dict = fields[key]
-                props.update(value)
-
-        return fields
+        return None
 
     def query(
         self,
@@ -219,6 +228,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         links_base = _determine_links_base_url(kwargs, self.links_base_url)
 
         with Session(self._engine) as session:
+            results = None
+
             if resulttype != "hits":
                 id_column = getattr(self.table_model, self.id_field)
 
@@ -239,15 +250,6 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                     .join(ids_cte, id_column == ids_cte.c.id)
                     .options(selected_properties)
                 )
-            else:
-                results = (
-                    session.query(self.table_model)
-                    .filter(property_filters)
-                    .filter(cql_filters)
-                    .filter(bbox_filter)
-                    .filter(time_filter)
-                    .options(selected_properties)
-                )
 
             response: Dict[str, Any] = {"type": "FeatureCollection"}
             response["features"] = []
@@ -266,13 +268,11 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 time_filter,
             )
 
-            if resulttype == "hits":
+            if resulttype == "hits" or not results:
                 return response
 
-            if not results:
-                return response
-
-            target_crs = _get_target_crs(crs_transform_spec, self.storage_crs_uri)
+            target_crs = _get_target_crs(
+                crs_transform_spec, self.storage_crs_uri)
 
             coord_trans = _get_coordinate_transformation(crs_transform_spec)
 
@@ -322,7 +322,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
             links_base = _determine_links_base_url(kwargs, self.links_base_url)
 
-            target_crs = _get_target_crs(crs_transform_spec, self.storage_crs_uri)
+            target_crs = _get_target_crs(
+                crs_transform_spec, self.storage_crs_uri)
 
             coord_trans = _get_coordinate_transformation(crs_transform_spec)
 
@@ -364,7 +365,13 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         if item_dict.get(self.geom):
             ewkb_elem: WKBElement = item_dict.pop(self.geom)
-            geom = self._get_geometry(ewkb_elem)
+            wkb_data = ewkb_elem.as_wkb().data
+            raw_geom: ogr.Geometry = ogr.CreateGeometryFromWkb(wkb_data)
+
+            if raw_geom.HasCurveGeometry():
+                geom = raw_geom.GetLinearGeometry()
+            else:
+                geom = raw_geom
 
             if coord_trans:
                 geom.Transform(coord_trans)
@@ -408,21 +415,17 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         bbox_crs84 = transform_bbox(bbox, self.storage_crs_uri, DEFAULT_CRS)
         storage_srid = self.storage_crs.to_epsg()
-        envelope = ST_Transform(ST_MakeEnvelope(*bbox_crs84, 4326), storage_srid)
+        envelope = ST_Transform(ST_MakeEnvelope(
+            *bbox_crs84, 4326), storage_srid)
 
         geom_column = getattr(self.table_model, self.geom)
         bbox_filter = ST_Intersects(envelope, geom_column)
 
         return bbox_filter
 
-    def _get_geometry(self, ewkb_elem: WKBElement) -> ogr.Geometry:
-        wkb_elem = ewkb_elem.as_wkb()
-        geom: ogr.Geometry = ogr.CreateGeometryFromWkb(wkb_elem.data)
-
-        return geom if not self.has_curve_geoms else geom.GetLinearGeometry()
-
     def _get_properties(self, select_properties: List[str]) -> List[str]:
-        keys = self._expand_property_prefixes(select_properties) or self._fields.keys()
+        keys = self._expand_property_prefixes(
+            select_properties) or self._fields.keys()
         filtered = [
             key
             for key in keys
@@ -446,7 +449,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
                 expanded.append(name)
                 continue
 
-            children = [key for key in self._fields if key.startswith(f"{name}.")]
+            children = [
+                key for key in self._fields if key.startswith(f"{name}.")]
 
             if children:
                 expanded.extend(children)
@@ -486,7 +490,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         # query param as a property filter; reject names that are not mapped
         # columns as 400 instead of letting getattr raise (HTTP 500).
         if properties:
-            valid_names = {attr.key for attr in class_mapper(self.table_model).attrs}
+            valid_names = {attr.key for attr in class_mapper(
+                self.table_model).attrs}
             for name, _ in properties:
                 if name not in valid_names:
                     raise ProviderInvalidQueryError(
@@ -552,7 +557,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             index = _find_identifier_index(ids, identifier_str)
 
         if index is None:
-            LOGGER.warning(
+            _logger.warning(
                 'ID "%s" not found in cached list for %s; skipping prev/next generation.',
                 identifier,
                 getattr(self.table_model, "__tablename__", self.table_model),
@@ -575,19 +580,6 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
 
         feature["prev"] = prev
         feature["next"] = next
-
-    # def _add_mapped_values(self, item_dict: Dict) -> None:
-    #     if not self.field_mapping_data:
-    #         return
-
-    #     for key, data in self.field_mapping_data.items():
-    #         if not key in item_dict:
-    #             continue
-
-    #         value = item_dict[key]
-    #         mapped_value = next(
-    #             (tup for tup in data if tup[0] == str(value)), None)
-    #         item_dict[key] = mapped_value[1] if mapped_value else value
 
     def _add_provider_links(
         self, feature: Dict[str, Any], feature_id: Any, links_base: str | None
@@ -649,7 +641,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         mapper.add_property(
             GEOMETRY_GML_KEY,
             column_property(
-                func.ST_AsGML(3, geom_expr, self.gml_precision, self.gml_options)
+                func.ST_AsGML(3, geom_expr, self.gml_precision,
+                              self.gml_options)
             ),
         )
 
@@ -670,7 +663,8 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         mapper.add_property(
             DERIVED_POINT_GML_KEY,
             column_property(
-                func.ST_AsGML(3, point_expr, self.gml_precision, self.gml_options)
+                func.ST_AsGML(3, point_expr, self.gml_precision,
+                              self.gml_options)
             ),
         )
 
@@ -686,7 +680,7 @@ def _resolve_property_shape(provider_def: Dict[str, Any]) -> str:
             )
 
         if flatten is not None:
-            LOGGER.warning(
+            _logger.warning(
                 "Both property_shape and flatten_properties are set; "
                 "property_shape=%r takes precedence.",
                 explicit,
@@ -850,7 +844,8 @@ def _determine_links_base_url(
     headers = kwargs.get("headers") or kwargs.get("request_headers")
 
     if isinstance(headers, dict):
-        proto = headers.get("X-Forwarded-Proto") or headers.get("Forwarded-Proto")
+        proto = headers.get(
+            "X-Forwarded-Proto") or headers.get("Forwarded-Proto")
         host = headers.get("X-Forwarded-Host") or headers.get("Host")
 
         if proto and host:
@@ -967,7 +962,7 @@ def _prepare_link(
                 break
 
     if not resolved_href or not _is_absolute_href(resolved_href):
-        LOGGER.warning(
+        _logger.warning(
             'Link href "%s" could not be resolved to an absolute URL.', href_value
         )
         return None
@@ -992,7 +987,8 @@ def _resolve_link_href(target: str, base_href: str | None) -> str:
         base_parts = urlsplit(base_href)
 
         if target_parts.path.startswith("/"):
-            combined_path = (base_parts.path.rstrip("/") + target_parts.path) or "/"
+            combined_path = (base_parts.path.rstrip(
+                "/") + target_parts.path) or "/"
 
             return urlunsplit(
                 (
@@ -1075,12 +1071,12 @@ def _render_link_template(
             rendered[key] = _format_template_value(value, context)
         except KeyError as err:
             missing = err.args[0]
-            LOGGER.warning(
+            _logger.warning(
                 'Link template field "%s" is missing property "%s".', key, missing
             )
             return None
         except Exception as err:
-            LOGGER.warning(
+            _logger.warning(
                 'Link template field "%s" could not be resolved: %s', key, err
             )
             return None
@@ -1131,103 +1127,3 @@ def _normalize_link_config(link_definition: Any) -> List[Dict[str, Any]]:
                 templates.append(deepcopy(item))
 
     return templates
-
-
-@cached(
-    cache=_sessions_cache,
-    key=lambda field_mappings, namespace, engine, db_search_path: keys.hashkey(
-        namespace
-    ),
-)
-def _get_field_mapping_data(
-    field_mappings: Dict[str, Dict[str, str]],
-    namespace: str,
-    engine: Engine,
-    db_search_path: str,
-) -> Dict[str, List[Tuple]]:
-    mapping_data: Dict[str, List[Tuple]] = {}
-
-    if not field_mappings:
-        return mapping_data
-
-    codelist_mappings = [
-        item for item in field_mappings.items() if "codelist" in item[1]
-    ]
-
-    if codelist_mappings:
-        codelist_mapping_data = _create_field_mapping_data_from_codelists(
-            codelist_mappings
-        )
-        mapping_data.update(codelist_mapping_data)
-
-    table_mappings = [item for item in field_mappings.items() if "table" in item[1]]
-
-    if table_mappings:
-        table_mapping_data = _create_field_mapping_data_from_tables(
-            engine, db_search_path, table_mappings
-        )
-        mapping_data.update(table_mapping_data)
-
-    return mapping_data
-
-
-def _create_field_mapping_data_from_tables(
-    engine: Engine, db_search_path: str, table_mappings: List[Tuple[str, Dict]]
-) -> Dict[str, List[Tuple]]:
-    mapping_data: Dict[str, List[Tuple]] = {}
-
-    with engine.connect() as connection:
-        for key, value in table_mappings:
-            try:
-                sql = f"SELECT {value.get('id_field')}, {value.get('value_field')} FROM {db_search_path}.{value.get('table')}"
-                result = connection.execute(text(sql))
-                rows = result.fetchall()
-                values = [tuple(row) for row in rows]
-                mapping_data[key] = values
-            except Exception as err:
-                LOGGER.warning(
-                    f"Could not create mapping data from table {value.get('table')}: {err}"
-                )
-
-    return mapping_data
-
-
-def _create_field_mapping_data_from_codelists(
-    codelist_mappings: List[Tuple[str, Dict[str, str]]],
-) -> Dict[str, List[Tuple]]:
-    mapping_data: Dict[str, List[Tuple]] = {}
-
-    for key, value in codelist_mappings:
-        url = value.get("codelist")
-
-        if not url:
-            continue
-
-        try:
-            mapping_data[key] = _get_codelist(url)
-        except Exception as err:
-            LOGGER.warning(f"Could not create mapping data from codelist {url}: {err}")
-
-    return mapping_data
-
-
-def _get_codelist(url: str) -> List[Tuple[str, str]]:
-    response = requests.get(url)
-    response.raise_for_status()
-
-    root = ET.fromstring(response.text)
-    ns = {"gml": "http://www.opengis.net/gml/3.2"}
-    codelist: List[Tuple[str, str]] = []
-
-    for definition in root.findall("gml:dictionaryEntry/gml:Definition", ns):
-        id = definition.findtext("gml:identifier", namespaces=ns)
-        name = definition.findtext("gml:name", namespaces=ns)
-
-        if not id or not name:
-            continue
-
-        codelist.append((id.strip(), name.strip()))
-
-    codelist.sort(key=lambda entry: entry[0])
-
-    return codelist
