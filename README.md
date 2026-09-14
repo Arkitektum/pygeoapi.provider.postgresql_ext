@@ -9,6 +9,7 @@ support for:
 - templated related links surfaced through the feature `links` array
 - selectable property shape (`dotted` | `nested` | `flat_leaf`) for
   collections whose columns use dot-separated naming
+- JSON schemas
 
 ## Property shape
 
