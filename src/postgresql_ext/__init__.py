@@ -17,14 +17,14 @@ from pygeoapi.provider.base import (
     ProviderInvalidQueryError,
     ProviderItemNotFoundError,
 )
-from pygeoapi.provider.sql import PostgreSQLProvider
+from pygeoapi.provider.sql import PostgreSQLProvider as PostgreSQLExtendedProvider
 from pygeoapi.crs import CrsTransformSpec, get_crs, transform_bbox, DEFAULT_STORAGE_CRS
 from .schema import json_schema_to_fields, json_schema_to_collection_schema
 
 ogr.UseExceptions()
 osr.UseExceptions()
 
-_sessions_cache = TTLCache(maxsize=640 * 1024, ttl=86400)
+_id_cache = TTLCache(maxsize=240, ttl=86400)
 _count_cache = TTLCache(maxsize=10240, ttl=86400)
 _signal_mtime: float = 0.0
 _logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ GEOMETRY_GML_KEY = "_geometry_gml"
 DERIVED_POINT_GML_KEY = "_derived_point_gml"
 
 
-class PostgreSQLExtendedProvider(PostgreSQLProvider):
+class PostgreSQLProvider(PostgreSQLExtendedProvider):
     """
     A provider for querying a PostgreSQL database.
       * Supports nonlinear geometry types
@@ -53,6 +53,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
       * Improved performance when querying large tables
       * Selectable property shape (dotted | nested | flat_leaf)
       * Fixes a bug related to BBOX filtering
+      * Supports JSON schemas
     """
 
     def __init__(self, provider_def: dict):
@@ -314,7 +315,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         self._check_cache_signal()
 
         with Session(self._engine) as session:
-            item = session.get(self.table_model, identifier)
+            item = session.get(self.table_model, identifier) # type: ignore
 
             if item is None:
                 msg = f"No such item: {self.id_field}={identifier}."
@@ -390,7 +391,6 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         feature["id"] = feature_id
         properties = {}
 
-        # self._add_mapped_values(item_dict)
         keys = self._get_properties(select_properties)
 
         for key in keys:
@@ -491,7 +491,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         # columns as 400 instead of letting getattr raise (HTTP 500).
         if properties:
             valid_names = {attr.key for attr in class_mapper(
-                self.table_model).attrs}
+                self.table_model).attrs} # type: ignore
             for name, _ in properties:
                 if name not in valid_names:
                     raise ProviderInvalidQueryError(
@@ -606,7 +606,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
             _merge_links(feature, link_candidates, links_base)
 
     def _get_collection_namespace(self) -> str:
-        return f"{self.db_name}.{self.db_search_path[0]}.{self.table}"
+        return f"{self.db_name}.{self.db_search_path[0]}.{self.table}" # type: ignore
 
     def _check_cache_signal(self) -> None:
         if self.cache_signal_path:
@@ -620,7 +620,7 @@ class PostgreSQLExtendedProvider(PostgreSQLProvider):
         wrappers) and ST_AsGML emits GML 3.2 with long CRS URNs. Geometries
         are NOT validated; invalid source geoms serialize to invalid GML.
         """
-        mapper = class_mapper(self.table_model)
+        mapper = class_mapper(self.table_model) # type: ignore
 
         if GEOMETRY_GML_KEY in mapper.attrs:
             return
@@ -732,7 +732,7 @@ def _add_geojson_crs(geojson: Dict[str, Any], crs_uri: str) -> None:
 
 
 @cached(
-    cache=_sessions_cache,
+    cache=_id_cache,
     key=lambda table_model, id_field, session: keys.hashkey(table_model),
 )
 def _get_table_ids(table_model, id_field, session: Session) -> List[Any]:
@@ -788,7 +788,7 @@ def flush_count_cache() -> None:
 def flush_caches() -> None:
     """Invalidate both module-level TTL caches (in-process only)."""
     _count_cache.clear()
-    _sessions_cache.clear()
+    _id_cache.clear()
 
 
 def _maybe_invalidate_from_signal(signal_path: str) -> None:
