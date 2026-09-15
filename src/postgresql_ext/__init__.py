@@ -114,29 +114,7 @@ class PostgreSQLProvider(PostgreSQLExtendedProvider):
         if self.property_shape == PROPERTY_SHAPE_FLAT_LEAF:
             return {key.split(".")[-1]: value for key, value in self._fields.items()}
 
-        if self.property_shape == PROPERTY_SHAPE_DOTTED:
-            return dict(self._fields)
-
-        result: Dict = {}
-
-        for key, value in self._fields.items():
-            parts = key.split(".")
-
-            if len(parts) == 1:
-                result[key] = value
-                continue
-
-            current = result
-
-            for part in parts[:-1]:
-                if part not in current:
-                    current[part] = {"type": "object", "properties": {}}
-                current = current[part]["properties"]
-
-            current[parts[-1]] = {k: v for k,
-                                  v in value.items() if v is not None}
-
-        return result
+        return dict(self._fields)
 
     @property
     def synthetic_property_keys(self) -> Tuple[str, ...]:
@@ -169,7 +147,7 @@ class PostgreSQLProvider(PostgreSQLExtendedProvider):
     def get_collection_schema(self) -> Dict | None:
         if self.schema:
             return json_schema_to_collection_schema(
-                self.schema, self.id_field, self.time_field, flatten=self.flatten_properties)
+                self.schema, self.property_shape, self.id_field, self.time_field)
 
         return None
 
