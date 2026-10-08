@@ -55,7 +55,7 @@ def schema_path(tmp_path):
 
 
 def test_schema_field_without_a_column_is_reported(schema_path, caplog):
-    with caplog.at_level(logging.WARNING, logger="postgresql_ext"):
+    with caplog.at_level(logging.WARNING, logger="postgresql_ext.schema_drift"):
         _StubProvider(schema_path, "identifikasjon.lokalId").get_cached_fields
 
     assert len(caplog.records) == 1
@@ -66,7 +66,7 @@ def test_schema_field_without_a_column_is_reported(schema_path, caplog):
 
 
 def test_columns_outside_the_schema_are_not_reported(schema_path, caplog):
-    with caplog.at_level(logging.WARNING, logger="postgresql_ext"):
+    with caplog.at_level(logging.WARNING, logger="postgresql_ext.schema_drift"):
         _StubProvider(
             schema_path, "identifikasjon.lokalId", "plantype", "rotasjon"
         ).get_cached_fields
@@ -75,7 +75,7 @@ def test_columns_outside_the_schema_are_not_reported(schema_path, caplog):
 
 
 def test_drift_is_reported_once_per_table_and_schema(schema_path, caplog):
-    with caplog.at_level(logging.WARNING, logger="postgresql_ext"):
+    with caplog.at_level(logging.WARNING, logger="postgresql_ext.schema_drift"):
         for _ in range(3):
             _StubProvider(schema_path, "identifikasjon.lokalId").get_cached_fields
 
@@ -86,3 +86,18 @@ def test_fields_still_come_from_the_schema(schema_path):
     fields = _StubProvider(schema_path, "identifikasjon.lokalId").get_cached_fields
 
     assert set(fields) == {"objid", "identifikasjon.lokalId", "plantype"}
+
+
+def test_drift_is_reported_when_the_root_logger_is_above_warning(
+    schema_path, caplog
+):
+    root = logging.getLogger()
+    previous = root.level
+    root.setLevel(logging.ERROR)
+    try:
+        _StubProvider(schema_path, "plantype").get_cached_fields
+    finally:
+        root.setLevel(previous)
+
+    assert len(caplog.records) == 1
+    assert caplog.records[0].name == "postgresql_ext.schema_drift"

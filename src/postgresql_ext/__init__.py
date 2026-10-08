@@ -28,6 +28,8 @@ _id_cache = TTLCache(maxsize=240, ttl=86400)
 _count_cache = TTLCache(maxsize=10240, ttl=86400)
 _signal_mtime: float = 0.0
 _logger = logging.getLogger(__name__)
+_drift_logger = logging.getLogger("postgresql_ext.schema_drift")
+_drift_logger.setLevel(logging.WARNING)
 
 _reported_schema_drift: set[tuple[str, str]] = set()
 
@@ -665,7 +667,7 @@ def _warn_schema_drift(
 
     missing = sorted(set(fields) - set(columns))
     if missing:
-        _logger.warning(
+        _drift_logger.warning(
             "Schema %s lists fields with no column in %s: %s",
             schema,
             table,

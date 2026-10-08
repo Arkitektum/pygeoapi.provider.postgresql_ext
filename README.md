@@ -42,9 +42,11 @@ precedence and a warning is logged.
 
 ## JSON schema drift
 
-When `schema` is set, the schema decides which properties are selected and published. At the first
-provider construction per process, fields the schema lists but the table lacks are logged once as a
-WARNING (`Schema <path> lists fields with no column in <table>: …`). Columns the schema leaves out are
+When `schema` is set, the schema decides which properties are selected and published. When the
+provider's fields are first read (at provider construction), fields the schema lists but the table
+lacks are logged once per process as a WARNING (`Schema <path> lists fields with no column in <table>: …`)
+on the `postgresql_ext.schema_drift` logger, which stays at WARNING even when pygeoapi's configured level
+is higher. Columns the schema leaves out are
 not reported — the schema is the allowlist.
 
 ## Cache invalidation
