@@ -3,7 +3,7 @@ import os
 from copy import deepcopy
 import logging
 import xml.etree.ElementTree as ET
-from typing import Dict, List, Tuple, Any
+from typing import Dict, Iterable, List, Tuple, Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from osgeo import ogr, osr
 from sqlalchemy import case, select
@@ -28,6 +28,8 @@ _id_cache = TTLCache(maxsize=240, ttl=86400)
 _count_cache = TTLCache(maxsize=10240, ttl=86400)
 _signal_mtime: float = 0.0
 _logger = logging.getLogger(__name__)
+
+_reported_schema_drift: set[tuple[str, str]] = set()
 
 DEFAULT_CRS = "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
 
@@ -136,6 +138,12 @@ class PostgreSQLProvider(PostgreSQLExtendedProvider):
             fields = json_schema_to_fields(self.schema)
 
             if fields:
+                _warn_schema_drift(
+                    self.table,
+                    self.schema,
+                    fields,
+                    self.table_model.__table__.columns.keys(),
+                )
                 self._fields = fields
                 return self._fields
 
@@ -644,6 +652,24 @@ class PostgreSQLProvider(PostgreSQLExtendedProvider):
                 func.ST_AsGML(3, point_expr, self.gml_precision,
                               self.gml_options)
             ),
+        )
+
+
+def _warn_schema_drift(
+    table: str, schema: str, fields: Iterable[str], columns: Iterable[str]
+) -> None:
+    key = (table, schema)
+    if key in _reported_schema_drift:
+        return
+    _reported_schema_drift.add(key)
+
+    missing = sorted(set(fields) - set(columns))
+    if missing:
+        _logger.warning(
+            "Schema %s lists fields with no column in %s: %s",
+            schema,
+            table,
+            ", ".join(missing),
         )
 
 

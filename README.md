@@ -40,6 +40,13 @@ shorthand for the two binary modes (`true` → `flat_leaf`, `false` →
 If both keys are set on the same provider, `property_shape` takes
 precedence and a warning is logged.
 
+## JSON schema drift
+
+When `schema` is set, the schema decides which properties are selected and published. At the first
+provider construction per process, fields the schema lists but the table lacks are logged once as a
+WARNING (`Schema <path> lists fields with no column in <table>: …`). Columns the schema leaves out are
+not reported — the schema is the allowlist.
+
 ## Cache invalidation
 
 `numberMatched` counts and prev/next id sets are cached in-process with a
